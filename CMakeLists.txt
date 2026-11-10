@@ -1,0 +1,47 @@
+cmake_minimum_required(VERSION 3.20)
+project(MarketLab VERSION 0.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Export compile commands for language servers
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Optimization and warning flags
+if(MSVC)
+    add_compile_options(/W4 /permissive- /utf-8)
+    add_compile_options("$<$<CONFIG:Release>:/O2 /Ob2 /Oi /Ot>")
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+    add_compile_options("$<$<CONFIG:Release>:-O3>")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
+endif()
+
+# Core library
+add_library(marketlab_core
+    src/order_book.cpp
+    src/reference_matcher.cpp
+    src/workload_generator.cpp
+    src/serializer.cpp
+    src/invariants.cpp
+)
+
+target_include_directories(marketlab_core PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
+
+# CLI application
+add_executable(marketlab app/main.cpp)
+target_link_libraries(marketlab PRIVATE marketlab_core)
+
+# Tests executable
+enable_testing()
+add_executable(marketlab_tests tests/test_matcher.cpp)
+target_link_libraries(marketlab_tests PRIVATE marketlab_core)
+add_test(NAME AllTests COMMAND marketlab_tests)
+
+# Benchmark executable
+add_executable(marketlab_benchmark benchmarks/benchmark.cpp)
+target_link_libraries(marketlab_benchmark PRIVATE marketlab_core)
