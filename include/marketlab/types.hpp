@@ -76,7 +76,9 @@ enum class RejectReason : uint8_t {
     InvalidPrice,
     InvalidQuantity,
     UnknownOrder,
-    OrderAlreadyFilledOrCancelled
+    OrderAlreadyFilledOrCancelled,
+    QuantityOverflow,
+    InvalidTimeInForce
 };
 
 [[nodiscard]] constexpr std::string_view to_string(RejectReason rr) noexcept {
@@ -87,6 +89,8 @@ enum class RejectReason : uint8_t {
         case RejectReason::InvalidQuantity: return "INVALID_QUANTITY";
         case RejectReason::UnknownOrder: return "UNKNOWN_ORDER";
         case RejectReason::OrderAlreadyFilledOrCancelled: return "ORDER_ALREADY_FILLED_OR_CANCELLED";
+        case RejectReason::QuantityOverflow: return "QUANTITY_OVERFLOW";
+        case RejectReason::InvalidTimeInForce: return "INVALID_TIME_IN_FORCE";
     }
     return "UNKNOWN_REASON";
 }
@@ -98,6 +102,8 @@ enum class RejectReason : uint8_t {
     if (sv == "INVALID_QUANTITY") return RejectReason::InvalidQuantity;
     if (sv == "UNKNOWN_ORDER") return RejectReason::UnknownOrder;
     if (sv == "ORDER_ALREADY_FILLED_OR_CANCELLED") return RejectReason::OrderAlreadyFilledOrCancelled;
+    if (sv == "QUANTITY_OVERFLOW") return RejectReason::QuantityOverflow;
+    if (sv == "INVALID_TIME_IN_FORCE") return RejectReason::InvalidTimeInForce;
     return std::nullopt;
 }
 

@@ -49,7 +49,78 @@ void OrderBook::process_new_order(const NewOrderCommand& cmd, std::vector<Event>
         }
     }
 
-    // 4. Order accepted
+    // 4. Validate TimeInForce
+    if (cmd.tif != TimeInForce::GTC && cmd.tif != TimeInForce::IOC) {
+        out_events.push_back(OrderRejectedEvent{
+            cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::InvalidTimeInForce
+        });
+        return;
+    }
+
+    // 5. Overflow Pre-check for resting residual:
+    // Determine exact matchable quantity to check if resting remainder would overflow side or level totals.
+    if (cmd.type == OrderType::Limit && cmd.tif == TimeInForce::GTC) {
+        Quantity matchable = 0;
+        if (cmd.side == Side::Buy) {
+            for (const auto& [ask_price, level] : asks_) {
+                if (ask_price > cmd.price) break;
+                matchable += level.total_quantity;
+                if (matchable >= cmd.quantity) break;
+            }
+            Quantity projected_remainder = (cmd.quantity > matchable) ? (cmd.quantity - matchable) : 0;
+            if (projected_remainder > 0) {
+                auto new_total_bid = CheckedMath::safe_add_quantity(total_bid_qty_, projected_remainder);
+                if (!new_total_bid) {
+                    out_events.push_back(OrderRejectedEvent{
+                        cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                    });
+                    return;
+                }
+                Quantity current_lvl_qty = 0;
+                auto lvl_it = bids_.find(cmd.price);
+                if (lvl_it != bids_.end()) {
+                    current_lvl_qty = lvl_it->second.total_quantity;
+                }
+                auto new_lvl_qty = CheckedMath::safe_add_quantity(current_lvl_qty, projected_remainder);
+                if (!new_lvl_qty) {
+                    out_events.push_back(OrderRejectedEvent{
+                        cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                    });
+                    return;
+                }
+            }
+        } else { // Side::Sell
+            for (const auto& [bid_price, level] : bids_) {
+                if (bid_price < cmd.price) break;
+                matchable += level.total_quantity;
+                if (matchable >= cmd.quantity) break;
+            }
+            Quantity projected_remainder = (cmd.quantity > matchable) ? (cmd.quantity - matchable) : 0;
+            if (projected_remainder > 0) {
+                auto new_total_ask = CheckedMath::safe_add_quantity(total_ask_qty_, projected_remainder);
+                if (!new_total_ask) {
+                    out_events.push_back(OrderRejectedEvent{
+                        cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                    });
+                    return;
+                }
+                Quantity current_lvl_qty = 0;
+                auto lvl_it = asks_.find(cmd.price);
+                if (lvl_it != asks_.end()) {
+                    current_lvl_qty = lvl_it->second.total_quantity;
+                }
+                auto new_lvl_qty = CheckedMath::safe_add_quantity(current_lvl_qty, projected_remainder);
+                if (!new_lvl_qty) {
+                    out_events.push_back(OrderRejectedEvent{
+                        cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                    });
+                    return;
+                }
+            }
+        }
+    }
+
+    // 6. Order accepted
     order_status_[cmd.order_id] = StoredOrderStatus::Active;
     out_events.push_back(OrderAcceptedEvent{
         cmd.seq_num, next_event_id(), cmd.order_id, cmd.side, cmd.type, cmd.price, cmd.quantity, cmd.tif
@@ -57,7 +128,7 @@ void OrderBook::process_new_order(const NewOrderCommand& cmd, std::vector<Event>
 
     Quantity remaining_qty = cmd.quantity;
 
-    // 5. Matching logic
+    // 7. Matching logic
     if (cmd.side == Side::Buy) {
         while (remaining_qty > 0 && !asks_.empty()) {
             auto best_ask_it = asks_.begin();
@@ -152,7 +223,7 @@ void OrderBook::process_new_order(const NewOrderCommand& cmd, std::vector<Event>
         }
     }
 
-    // 6. Post-match handling
+    // 8. Post-match handling
     if (remaining_qty == 0) {
         order_status_[cmd.order_id] = StoredOrderStatus::Filled;
     } else {
@@ -231,7 +302,6 @@ void OrderBook::process_cancel(const CancelOrderCommand& cmd, std::vector<Event>
 
     auto idx_it = order_index_.find(cmd.order_id);
     if (idx_it == order_index_.end()) {
-        // Should not happen if state is consistent, but guard safely
         out_events.push_back(OrderRejectedEvent{
             cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::UnknownOrder
         });

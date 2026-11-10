@@ -42,6 +42,10 @@ add_executable(marketlab_tests tests/test_matcher.cpp)
 target_link_libraries(marketlab_tests PRIVATE marketlab_core)
 add_test(NAME AllTests COMMAND marketlab_tests)
 
+add_executable(marketlab_regressions tests/test_regressions.cpp)
+target_link_libraries(marketlab_regressions PRIVATE marketlab_core)
+add_test(NAME RegressionTests COMMAND marketlab_regressions)
+
 # Benchmark executable
 add_executable(marketlab_benchmark benchmarks/benchmark.cpp)
 target_link_libraries(marketlab_benchmark PRIVATE marketlab_core)

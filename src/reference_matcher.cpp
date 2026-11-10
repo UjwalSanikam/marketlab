@@ -48,7 +48,64 @@ void ReferenceMatcher::process_new_order(const NewOrderCommand& cmd, std::vector
         }
     }
 
-    // 4. Accept
+    // 4. Validate TimeInForce
+    if (cmd.tif != TimeInForce::GTC && cmd.tif != TimeInForce::IOC) {
+        out_events.push_back(OrderRejectedEvent{
+            cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::InvalidTimeInForce
+        });
+        return;
+    }
+
+    // 5. Overflow Pre-check for resting remainder (GTC limit orders)
+    if (cmd.type == OrderType::Limit && cmd.tif == TimeInForce::GTC) {
+        Quantity matchable = 0;
+        Quantity total_side_qty = 0;
+        Quantity current_lvl_qty = 0;
+
+        for (const auto& o : resting_orders_) {
+            if (cmd.side == Side::Buy) {
+                if (o.side == Side::Sell && o.price <= cmd.price) {
+                    matchable += o.remaining_quantity;
+                }
+                if (o.side == Side::Buy) {
+                    total_side_qty += o.remaining_quantity;
+                    if (o.price == cmd.price) {
+                        current_lvl_qty += o.remaining_quantity;
+                    }
+                }
+            } else {
+                if (o.side == Side::Buy && o.price >= cmd.price) {
+                    matchable += o.remaining_quantity;
+                }
+                if (o.side == Side::Sell) {
+                    total_side_qty += o.remaining_quantity;
+                    if (o.price == cmd.price) {
+                        current_lvl_qty += o.remaining_quantity;
+                    }
+                }
+            }
+        }
+
+        Quantity projected_remainder = (cmd.quantity > matchable) ? (cmd.quantity - matchable) : 0;
+        if (projected_remainder > 0) {
+            auto new_side_qty = CheckedMath::safe_add_quantity(total_side_qty, projected_remainder);
+            if (!new_side_qty) {
+                out_events.push_back(OrderRejectedEvent{
+                    cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                });
+                return;
+            }
+            auto new_lvl_qty = CheckedMath::safe_add_quantity(current_lvl_qty, projected_remainder);
+            if (!new_lvl_qty) {
+                out_events.push_back(OrderRejectedEvent{
+                    cmd.seq_num, next_event_id(), cmd.order_id, RejectReason::QuantityOverflow
+                });
+                return;
+            }
+        }
+    }
+
+    // 6. Accept
     order_status_[cmd.order_id] = StoredOrderStatus::Active;
     out_events.push_back(OrderAcceptedEvent{
         cmd.seq_num, next_event_id(), cmd.order_id, cmd.side, cmd.type, cmd.price, cmd.quantity, cmd.tif
@@ -56,7 +113,7 @@ void ReferenceMatcher::process_new_order(const NewOrderCommand& cmd, std::vector
 
     Quantity remaining_qty = cmd.quantity;
 
-    // 5. Brute-force price-time matching loop
+    // 7. Brute-force price-time matching loop
     while (remaining_qty > 0) {
         size_t best_idx = size_t(-1);
 
@@ -126,7 +183,7 @@ void ReferenceMatcher::process_new_order(const NewOrderCommand& cmd, std::vector
         }
     }
 
-    // 6. Post-match handling
+    // 8. Post-match handling
     if (remaining_qty == 0) {
         order_status_[cmd.order_id] = StoredOrderStatus::Filled;
     } else {

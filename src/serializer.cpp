@@ -7,26 +7,26 @@ namespace marketlab {
 
 namespace {
 
-// Helper to extract a string value for a key in a JSON object: "key":"value" or "key":value
+std::string trim(std::string_view sv) {
+    size_t first = sv.find_first_not_of(" \t\r\n");
+    if (first == std::string_view::npos) return "";
+    size_t last = sv.find_last_not_of(" \t\r\n");
+    return std::string(sv.substr(first, (last - first + 1)));
+}
+
+// Extract JSON field string or raw token
 std::optional<std::string> extract_json_value(const std::string& json, const std::string& key) {
-    std::string pattern = "\"" + key + "\"\\s*:\\s*(\"[^\"]*\"|[-+]?[0-9]+|true|false)";
+    std::string pattern = "\"" + key + "\"\\s*:\\s*(\"[^\"]*\"|[-+]?[0-9a-zA-Z_.]+)?";
     std::regex re(pattern);
     std::smatch match;
-    if (std::regex_search(json, match, re) && match.size() > 1) {
+    if (std::regex_search(json, match, re) && match.size() > 1 && match[1].matched) {
         std::string val = match[1].str();
-        if (val.front() == '"' && val.back() == '"') {
+        if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
             return val.substr(1, val.size() - 2);
         }
         return val;
     }
     return std::nullopt;
-}
-
-std::string trim(const std::string& str) {
-    size_t first = str.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) return "";
-    size_t last = str.find_last_not_of(" \t\r\n");
-    return str.substr(first, (last - first + 1));
 }
 
 } // namespace
@@ -131,7 +131,6 @@ std::string Serializer::to_ascii_book(const BookSnapshot& snap) {
     ss << "  SIDE  |   PRICE   |   QUANTITY   |  ORDERS\n";
     ss << "---------------------------------------------------------\n";
 
-    // Show asks in reverse order (highest first down to lowest ask)
     for (auto it = snap.asks.rbegin(); it != snap.asks.rend(); ++it) {
         ss << "  ASK   | " << std::setw(9) << it->price
            << " | " << std::setw(12) << it->quantity
@@ -158,21 +157,37 @@ std::string Serializer::to_ascii_book(const BookSnapshot& snap) {
     return ss.str();
 }
 
-std::optional<Command> Serializer::parse_command_line(const std::string& line) {
+std::optional<Command> Serializer::parse_command_line(const std::string& line, std::string* out_error) {
     std::string s = trim(line);
-    if (s.empty() || s.front() == '#') return std::nullopt;
+    if (s.empty()) {
+        if (out_error) *out_error = "Empty line";
+        return std::nullopt;
+    }
+    if (s.front() == '#') {
+        if (out_error) *out_error = "Comment line";
+        return std::nullopt;
+    }
 
-    // Check if JSON format
     if (s.front() == '{') {
         auto type_str = extract_json_value(s, "type");
-        if (!type_str) return std::nullopt;
+        if (!type_str) {
+            if (out_error) *out_error = "Missing or malformed 'type' field in JSON command";
+            return std::nullopt;
+        }
 
         auto seq_str = extract_json_value(s, "seq");
         auto id_str = extract_json_value(s, "id");
-        if (!seq_str || !id_str) return std::nullopt;
+        if (!seq_str || !id_str) {
+            if (out_error) *out_error = "Missing 'seq' or 'id' field in JSON command";
+            return std::nullopt;
+        }
 
-        SeqNum seq = std::stoull(*seq_str);
-        OrderId id = std::stoull(*id_str);
+        auto seq_opt = parse_strict_integer<SeqNum>(*seq_str);
+        auto id_opt = parse_strict_integer<OrderId>(*id_str);
+        if (!seq_opt || !id_opt) {
+            if (out_error) *out_error = "Invalid numeric format or range for 'seq' or 'id'";
+            return std::nullopt;
+        }
 
         if (*type_str == "NEW") {
             auto side_str = extract_json_value(s, "side");
@@ -181,76 +196,152 @@ std::optional<Command> Serializer::parse_command_line(const std::string& line) {
             auto qty_str = extract_json_value(s, "qty");
             auto tif_str = extract_json_value(s, "tif");
 
-            if (!side_str || !otype_str || !price_str || !qty_str) return std::nullopt;
+            if (!side_str || !otype_str || !price_str || !qty_str) {
+                if (out_error) *out_error = "Missing required fields for NEW order (side, order_type, price, qty)";
+                return std::nullopt;
+            }
 
             auto side_opt = parse_side(*side_str);
+            if (!side_opt) {
+                if (out_error) *out_error = "Invalid 'side' value: '" + *side_str + "'";
+                return std::nullopt;
+            }
+
             auto otype_opt = parse_order_type(*otype_str);
-            if (!side_opt || !otype_opt) return std::nullopt;
+            if (!otype_opt) {
+                if (out_error) *out_error = "Invalid 'order_type' value: '" + *otype_str + "'";
+                return std::nullopt;
+            }
 
             TimeInForce tif = TimeInForce::GTC;
             if (tif_str) {
                 auto tif_opt = parse_time_in_force(*tif_str);
-                if (tif_opt) tif = *tif_opt;
+                if (!tif_opt) {
+                    if (out_error) *out_error = "Invalid 'tif' (TimeInForce) value: '" + *tif_str + "'";
+                    return std::nullopt;
+                }
+                tif = *tif_opt;
             }
 
-            Price price = std::stoll(*price_str);
-            Quantity qty = std::stoll(*qty_str);
+            auto price_opt = parse_strict_integer<Price>(*price_str);
+            if (!price_opt) {
+                if (out_error) *out_error = "Invalid numeric format or range for 'price': '" + *price_str + "'";
+                return std::nullopt;
+            }
 
-            return NewOrderCommand{seq, id, *side_opt, *otype_opt, price, qty, tif};
+            auto qty_opt = parse_strict_integer<Quantity>(*qty_str);
+            if (!qty_opt) {
+                if (out_error) *out_error = "Invalid numeric format or range for 'qty': '" + *qty_str + "'";
+                return std::nullopt;
+            }
+
+            return NewOrderCommand{*seq_opt, *id_opt, *side_opt, *otype_opt, *price_opt, *qty_opt, tif};
         } else if (*type_str == "CANCEL") {
-            return CancelOrderCommand{seq, id};
+            return CancelOrderCommand{*seq_opt, *id_opt};
+        } else {
+            if (out_error) *out_error = "Unknown command type: '" + *type_str + "'";
+            return std::nullopt;
         }
+    }
+
+    // Space-delimited format
+    std::istringstream iss(s);
+    std::string type_token;
+    if (!(iss >> type_token)) {
+        if (out_error) *out_error = "Malformed command line";
         return std::nullopt;
     }
 
-    // Space-delimited format:
-    // NEW <seq> <id> <side> <type> <price> <qty> [tif]
-    // CANCEL <seq> <id>
-    std::istringstream iss(s);
-    std::string type_token;
-    if (!(iss >> type_token)) return std::nullopt;
-
     if (type_token == "NEW") {
-        SeqNum seq;
-        OrderId id;
-        std::string side_str, otype_str;
-        Price price;
-        Quantity qty;
+        std::string seq_tok, id_tok, side_str, otype_str, price_tok, qty_tok;
         std::string tif_str = "GTC";
 
-        if (!(iss >> seq >> id >> side_str >> otype_str >> price >> qty)) {
+        if (!(iss >> seq_tok >> id_tok >> side_str >> otype_str >> price_tok >> qty_tok)) {
+            if (out_error) *out_error = "Incomplete NEW command tokens";
             return std::nullopt;
         }
 
         iss >> tif_str;
 
+        auto seq_opt = parse_strict_integer<SeqNum>(seq_tok);
+        auto id_opt = parse_strict_integer<OrderId>(id_tok);
+        auto price_opt = parse_strict_integer<Price>(price_tok);
+        auto qty_opt = parse_strict_integer<Quantity>(qty_tok);
+
+        if (!seq_opt || !id_opt || !price_opt || !qty_opt) {
+            if (out_error) *out_error = "Invalid numeric format in tokens";
+            return std::nullopt;
+        }
+
         auto side_opt = parse_side(side_str);
         auto otype_opt = parse_order_type(otype_str);
         auto tif_opt = parse_time_in_force(tif_str);
 
-        if (!side_opt || !otype_opt || !tif_opt) return std::nullopt;
+        if (!side_opt) {
+            if (out_error) *out_error = "Invalid side: '" + side_str + "'";
+            return std::nullopt;
+        }
+        if (!otype_opt) {
+            if (out_error) *out_error = "Invalid order type: '" + otype_str + "'";
+            return std::nullopt;
+        }
+        if (!tif_opt) {
+            if (out_error) *out_error = "Invalid TimeInForce: '" + tif_str + "'";
+            return std::nullopt;
+        }
 
-        return NewOrderCommand{seq, id, *side_opt, *otype_opt, price, qty, *tif_opt};
+        return NewOrderCommand{*seq_opt, *id_opt, *side_opt, *otype_opt, *price_opt, *qty_opt, *tif_opt};
     } else if (type_token == "CANCEL") {
-        SeqNum seq;
-        OrderId id;
-        if (!(iss >> seq >> id)) return std::nullopt;
-        return CancelOrderCommand{seq, id};
+        std::string seq_tok, id_tok;
+        if (!(iss >> seq_tok >> id_tok)) {
+            if (out_error) *out_error = "Incomplete CANCEL command tokens";
+            return std::nullopt;
+        }
+
+        auto seq_opt = parse_strict_integer<SeqNum>(seq_tok);
+        auto id_opt = parse_strict_integer<OrderId>(id_tok);
+        if (!seq_opt || !id_opt) {
+            if (out_error) *out_error = "Invalid numeric format for CANCEL seq or id";
+            return std::nullopt;
+        }
+
+        return CancelOrderCommand{*seq_opt, *id_opt};
     }
 
+    if (out_error) *out_error = "Unrecognized command token: '" + type_token + "'";
     return std::nullopt;
 }
 
-std::vector<Command> Serializer::read_commands(std::istream& is) {
-    std::vector<Command> commands;
+ReadCommandsResult Serializer::read_commands_checked(std::istream& is) {
+    ReadCommandsResult res;
     std::string line;
+    size_t line_number = 0;
+
     while (std::getline(is, line)) {
-        auto cmd = parse_command_line(line);
-        if (cmd) {
-            commands.push_back(*cmd);
+        ++line_number;
+        std::string trimmed = trim(line);
+        // Intentional handling: ignore blank lines and '#' comment lines
+        if (trimmed.empty() || trimmed.front() == '#') {
+            continue;
         }
+
+        std::string error_msg;
+        auto cmd = parse_command_line(trimmed, &error_msg);
+        if (!cmd) {
+            res.success = false;
+            res.error = ParseError{line_number, line, error_msg};
+            return res;
+        }
+        res.commands.push_back(*cmd);
     }
-    return commands;
+
+    res.success = true;
+    return res;
+}
+
+std::vector<Command> Serializer::read_commands(std::istream& is) {
+    auto res = read_commands_checked(is);
+    return res.commands;
 }
 
 void Serializer::write_commands(std::ostream& os, const std::vector<Command>& commands) {

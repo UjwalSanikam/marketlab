@@ -2,23 +2,30 @@
 
 MarketLab is a deterministic exchange simulator and trading research platform engineered to study how execution latency, queue dynamics, market data failures, and pre-trade risk controls alter algorithmic strategy outcomes, fills, and portfolio survival.
 
-This repository implements **Milestone 1: The Deterministic Matching Engine Core**.
+This repository implements **Milestone 1: The Deterministic Matching Engine Core** with comprehensive arithmetic hardening, deterministic input validation, SHA-256 reproducibility, and differential verification.
 
 ---
 
-## 1. What Currently Works (Milestone 1)
+## 1. What Currently Works (Milestone 1 Hardened)
 
 - **C++20 Limit Order Book Engine**:
   - Price-time (FIFO) priority at every price level.
   - Limit orders (GTC and IOC) and Market orders.
   - Partial fills and resting residual quantities.
   - Cancellation by Order ID with $O(1)$ order index unlinking.
-  - Exact integer ticks and lots with checked arithmetic (no floating-point rounding errors).
-  - Explicit deterministic rejections (duplicate IDs, invalid ticks/lots, non-positive prices/quantities, unknown or completed cancellations).
+  - Exact integer ticks and lots with checked arithmetic (`CheckedMath`).
+  - Strict absence of floating-point arithmetic throughout the matching core.
+  - **Deterministic Overflow Protection**: Pre-checks prospective resting residuals against side and level aggregate bounds before acceptance; rejects potential overflows upfront with `QUANTITY_OVERFLOW` without emitting partial or orphan trades.
+- **Strict Input Validation & Parsing**:
+  - Validates numeric ranges with strict integer conversion (`from_chars`), disallowing decimals and trailing junk.
+  - Enforces explicit `TimeInForce` validation (`GTC` and `IOC` only; invalid strings such as `"INVALID"` trigger parse errors).
+  - Provides line-numbered error diagnostics with nonzero exit codes upon encountering malformed input.
+  - Documented file parsing policy: blank lines and `#` comment lines are intentionally ignored.
 - **Deterministic Command & Event Journal**:
   - Strongly typed input commands (`NewOrderCommand`, `CancelOrderCommand`) with sequential numbers.
   - Deterministic event generation (`OrderAcceptedEvent`, `TradeEvent`, `OrderCanceledEvent`, `OrderRejectedEvent`).
   - Strict absence of nondeterministic timestamps in canonical event logs.
+  - Built-in **SHA-256 hash generation** for event streams and final state snapshots.
 - **Auditing & Invariant Verification**:
   - Price level order sum equals level total quantity.
   - Book totals match constituent level totals.
@@ -33,7 +40,7 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
   - Synthetic deterministic workload generation (`marketlab generate`).
   - Replay of saved command streams (`marketlab replay`).
   - Differential testing (`marketlab test-differential`).
-  - In-memory benchmark runner (`marketlab benchmark` / `marketlab_benchmark.exe`).
+  - In-memory service-time benchmark runner (`marketlab benchmark` / `marketlab_benchmark.exe`).
 - **Python Research Environment**:
   - Python virtual environment created in `.venv` with `marketlab` installed in editable mode (`python/marketlab`).
 
@@ -43,7 +50,7 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
 
 ### Matching Rules
 1. **Execution Price**: Trades execute strictly at the **resting order's (maker's) price**.
-2. **Limit Orders (GTC)**: Crosses available liquidity at resting maker prices. Any unfilled remainder rests on the book at its limit price in FIFO order.
+2. **Limit Orders (GTC)**: Crosses available liquidity at resting maker prices. Any unfilled remainder rests on the book at its limit price in FIFO order. If resting the remainder would cause aggregate side or level quantity to overflow `int64_t` max, the order is rejected upfront with `QUANTITY_OVERFLOW`.
 3. **Limit Orders (IOC)**: Crosses available liquidity up to its limit price. Any unfilled remainder is immediately canceled with `IOC_REMAINDER`.
 4. **Market Orders**: Crosses resting depth regardless of price. A market order never rests; any unfilled remainder (or full quantity if the book is empty) is immediately canceled with `MARKET_REMAINDER`. Market orders must carry price `0`.
 5. **Cancellations**: Canceling an active order immediately unlinks it and emits `OrderCanceledEvent` with `USER_REQUESTED`. Canceling an unknown ID or an order that was already filled or canceled returns deterministic `UNKNOWN_ORDER` or `ORDER_ALREADY_FILLED_OR_CANCELLED`.
@@ -76,6 +83,7 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
                                 v
                   +---------------------------+
                   |    OrderBook Validator    |
+                  |  (CheckedMath & Overflow) |
                   +-------------+-------------+
                                 |
                  +--------------+--------------+
@@ -98,14 +106,15 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
                                 v
                   +---------------------------+
                   | Deterministic Event Stream|
+                  |  (with Canonical SHA-256) |
                   +---------------------------+
 ```
 
-1. **Price Levels**: `std::map<Price, PriceLevel, std::greater<Price>>` for Bids and `std::map<Price, PriceLevel, std::less<Price>>` for Asks. This guarantees strictly sorted price levels and instant access to best bid/ask.
-2. **Order Queues**: `std::list<RestingOrder>` inside each level guarantees iterator stability: pointers/iterators to queued orders remain valid upon insertions and removals elsewhere.
-3. **Order Index**: `std::unordered_map<OrderId, IndexEntry>` enables $O(1)$ order lookup and list unlinking upon cancellation or partial fill.
+1. **Price Levels**: `std::map<Price, PriceLevel, std::greater<Price>>` for Bids and `std::map<Price, PriceLevel, std::less<Price>>` for Asks.
+2. **Order Queues**: `std::list<RestingOrder>` inside each level guarantees iterator stability upon insertions and removals.
+3. **Order Index**: `std::unordered_map<OrderId, IndexEntry>` enables $O(1)$ order lookup and list unlinking on cancellation or partial fill.
 4. **Empty Level Pruning**: Levels whose constituent orders are fully depleted are immediately removed from the map.
-5. **Checked Integer Arithmetic**: `CheckedMath` guards against overflow, underflow, and negative values. Prices and quantities are integer multiples of instrument ticks and lots.
+5. **Checked Integer Arithmetic**: `CheckedMath` guards against overflow, underflow, and negative values across individual orders, price levels, book aggregates, and lifecycle audits.
 
 ---
 
@@ -121,26 +130,27 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
 # Configure Release build with Clang and Ninja
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-# Build all targets (core library, CLI, test suite, and benchmark)
+# Build all targets (core library, CLI, test suite, regressions, benchmark)
 cmake --build build
 ```
 
-### Run Automated Tests & Invariant Verification
+### Run Automated Tests & Regression Suite
 ```powershell
-# Run the test suite directly
-.\build\marketlab_tests.exe
-
-# Or run via CTest
+# Run the complete test suite and hardening regression checks via CTest
 ctest --test-dir build --output-on-failure
+
+# Or run executables directly:
+.\build\marketlab_tests.exe
+.\build\marketlab_regressions.exe
 ```
-All unit tests and differential tests pass with 100% success.
+All unit tests, differential tests, and hardening regression tests pass with 100% success.
 
 ---
 
 ## 5. CLI Commands & Demonstration
 
 ### 1. Interactive Demo
-Runs a step-by-step demonstration illustrating FIFO priority, multi-level sweeps, partial fills, cancellations, deterministic rejections, and invariant verification:
+Demonstrates FIFO priority, multi-level sweeps, partial fills, cancellations, deterministic rejections, and quantity overflow guards:
 ```powershell
 .\build\marketlab.exe demo
 ```
@@ -151,8 +161,8 @@ Generates a deterministic synthetic stream of orders from a seed:
 .\build\marketlab.exe generate --seed 42 --count 10000 --output commands.jsonl
 ```
 
-### 3. Replay Workload with Full Audit
-Replays a saved command stream, exports events and state, displays ASCII book, and verifies all invariants:
+### 3. Replay Workload with SHA-256 Hashes & Invariant Audit
+Replays a saved command stream, exports events and state, reports canonical SHA-256 hashes, and verifies all invariants:
 ```powershell
 .\build\marketlab.exe replay --input commands.jsonl --events-out events.jsonl --state-out state.json --ascii --verify
 ```
@@ -165,57 +175,59 @@ Executes randomized generated workloads through both the production `OrderBook` 
 
 ---
 
-## 6. Actual Benchmark Results
+## 6. In-Memory Service-Time Benchmark Results
 
-The benchmark measures the pure in-memory matching core separately from CLI JSON parsing and file I/O.
+The benchmark measures in-memory single-threaded service time separately from CLI JSON parsing, network stacks, and file I/O.
 
-### Environment
+### Environment & Calibration
 - **Platform**: Windows 11 (x86_64)
 - **Compiler**: Clang 23.1.4 (x86_64-w64-windows-gnu)
 - **Build Mode**: Release (`-O3`, `NDEBUG`, `-static`)
-- **Timer**: `std::chrono::steady_clock` (Windows QPC)
+- **System Timer**: `std::chrono::steady_clock` (Windows QPC)
+- **Timer Call Overhead**: ~19.9 ns / call
+- **Timer Resolution**: ~100 ns minimum observable tick
+- *Note on Latency Interpretation*: Zero-duration latency samples (`0.0 ns`) occur when a command completes faster than the timer tick resolution (< 100 ns).
 
-### Benchmark Workload
-- **Workload size**: 1,000,000 commands
-- **Seed**: 42
-- **Command Mix**: 70% Limit orders (5% IOC), 10% Market orders, 20% Cancellations
-- **Active Resting Book**: 8,012 orders (489 bid levels, 606 ask levels)
+### Workload Outcomes (1,000,000 Commands, Seed 42)
+- **Total commands processed**: 1,000,000
+- **Accepted new orders**: 800,033
+- **Successful cancellations**: 44,142
+- **Rejected cancellations**: 155,825 (`ORDER_ALREADY_FILLED_OR_CANCELLED`: 155,825)
+- **Remainder cancellations**: 21,922 (IOC and Market order residuals)
+- **Trades executed**: 718,701
+- **Rejected new orders**: 0
+- **Active resting book at finish**: 8,012 orders (489 bid levels, 606 ask levels)
+- **Book invariant check**: PASS
 
-### Measured Results
-```text
-=========================================================
- MarketLab Milestone 1: In-Memory Matching Benchmark
-=========================================================
-1. UN-INSTRUMENTED THROUGHPUT MEASUREMENT:
-  Execution time:        0.1000 s
-  Throughput:            10,000,870 commands/sec (~10.0M cmds/sec)
-  Event generation rate: 17,407,744 events/sec (~17.4M events/sec)
-  Total events:          1,740,623
-  Active book size:      8,012 resting orders (489 bid levels, 606 ask levels)
-  Book invariant check:  PASS
+### Repeated Throughput Trials (5 Trials)
+- **Trial 1**: 7,953,052 commands/sec (0.1257 s)
+- **Trial 2**: 8,025,875 commands/sec (0.1246 s)
+- **Trial 3**: 8,137,849 commands/sec (0.1229 s)
+- **Trial 4**: 8,548,601 commands/sec (0.1170 s)
+- **Trial 5**: 7,817,924 commands/sec (0.1279 s)
+- **Mean Throughput**: **8,096,660 commands/sec** (~8.1M cmds/sec)
+- **Throughput Range**: [7,817,924, 8,548,601] commands/sec
+- **Standard Deviation**: +/- 248,707 commands/sec (3.07%)
 
-2. INSTRUMENTED LATENCY MEASUREMENT:
-  Latency statistics (per command):
-    Min:         0.0 ns
-    Mean:      120.7 ns
-    p50:       100.0 ns  (0.100 us)
-    p90:       200.0 ns  (0.200 us)
-    p99:       300.0 ns  (0.300 us)
-    p99.9:     600.0 ns  (0.600 us)
-    Max:    7330.6 us    (initial allocator cold page faults)
-=========================================================
-```
+### Instrumented Service-Time Latency Distribution
+- **Min**: 0.0 ns
+- **Mean**: 143.4 ns
+- **p50**: 100.0 ns (0.100 µs)
+- **p90**: 200.0 ns (0.200 µs)
+- **p99**: 400.0 ns (0.400 µs)
+- **p99.9**: 1,200.0 ns (1.200 µs)
+- **Max**: 8,460.9 µs
 
-### Measurement Methodology & Limitations
-- **Throughput vs Latency**: Measured in distinct runs. The throughput run has zero timing instrumentation inside the hot loop. The latency run records individual command deltas.
-- **Clock overhead**: High-resolution clock read on Windows adds ~15–25 ns overhead per sample in the latency run.
-- **Tree-map overhead**: The current implementation uses node-allocated `std::map` and `std::list`. Milestone 6 will introduce a bounded tick-indexed flat price ladder with an order pool to eliminate node heap allocations entirely.
+### Limitations
+- Measurements reflect pure single-threaded in-memory service time; network latency and serialization overhead are excluded.
+- The current Milestone 1 book uses node-based `std::map` and `std::list`. Tail latency reflects maximum observed duration including OS thread scheduling jitter and memory allocation pauses.
+- Milestone 6 will introduce a bounded flat price ladder and order pool to eliminate tree-node dynamic allocations.
 
 ---
 
 ## 7. Python Virtual Environment
 
-A Python virtual environment is set up at `.venv`:
+A Python virtual environment is configured at `.venv`:
 ```powershell
 # Activate the virtual environment
 .\.venv\Scripts\Activate.ps1
@@ -226,16 +238,7 @@ python -c "import marketlab; print(marketlab.__version__)"
 
 ---
 
-## 8. Git Repository & Remote
-
-The repository is tracked with Git and configured with remote:
-```text
-https://github.com/UjwalSanikam/marketlab.git
-```
-
----
-
-## 9. Next Milestone (Milestone 2)
+## 8. Next Milestone (Milestone 2)
 
 Milestone 2 will introduce:
 1. Virtual clock and deterministic event scheduler.

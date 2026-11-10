@@ -11,6 +11,7 @@
 #include "marketlab/workload_generator.hpp"
 #include "marketlab/serializer.hpp"
 #include "marketlab/invariants.hpp"
+#include "marketlab/sha256.hpp"
 
 using namespace marketlab;
 
@@ -18,7 +19,7 @@ void print_help() {
     std::cout << "MarketLab CLI - Deterministic Matching Engine & Research Platform\n\n";
     std::cout << "Usage:\n";
     std::cout << "  marketlab demo\n";
-    std::cout << "      Run built-in demonstration showcasing FIFO priority, partial fills, and cancel.\n\n";
+    std::cout << "      Run built-in demonstration showcasing FIFO priority, partial fills, cancel, and overflow guards.\n\n";
     std::cout << "  marketlab generate [options]\n";
     std::cout << "      Generate a synthetic deterministic command stream.\n";
     std::cout << "      Options:\n";
@@ -40,7 +41,7 @@ void print_help() {
     std::cout << "        --seed <num>       RNG seed (default: 42)\n";
     std::cout << "        --count <num>      Number of commands (default: 5000)\n\n";
     std::cout << "  marketlab benchmark [options]\n";
-    std::cout << "      Run in-memory throughput and latency benchmark.\n";
+    std::cout << "      Run in-memory service-time benchmark.\n";
     std::cout << "      Options:\n";
     std::cout << "        --commands <num>   Command count (default: 500000)\n";
     std::cout << "        --seed <num>       RNG seed (default: 42)\n";
@@ -107,10 +108,16 @@ int run_demo() {
     std::cout << "Current Book State (Level 100 now empty and removed):\n";
     std::cout << Serializer::to_ascii_book(book.get_snapshot()) << "\n";
 
-    std::cout << "--- 5. Deterministic Rejection Handling ---\n";
+    std::cout << "--- 5. Deterministic Rejection & Overflow Guards ---\n";
     print_and_process("Attempt to cancel already canceled Order 1002", CancelOrderCommand{9, 1002});
     print_and_process("Submit duplicate Order ID 1001",
                       NewOrderCommand{10, 1001, Side::Buy, OrderType::Limit, 100, 5, TimeInForce::GTC});
+
+    // Overflow guard demo
+    print_and_process("Submit massive Buy Order near max int64 (fits within capacity)",
+                      NewOrderCommand{11, 2001, Side::Buy, OrderType::Limit, 95, 9223372036854775000LL, TimeInForce::GTC});
+    print_and_process("Submit Buy Order that would cause aggregate overflow (must be rejected upfront)",
+                      NewOrderCommand{12, 2002, Side::Buy, OrderType::Limit, 95, 1000000000LL, TimeInForce::GTC});
 
     auto inv = InvariantChecker::check_book_invariants(book);
     std::cout << "Final Invariant Audit: " << (inv.ok ? "ALL INVARIANTS PASS" : ("FAILED: " + inv.message)) << "\n";
@@ -186,7 +193,15 @@ int run_replay(int argc, char* argv[]) {
         return 1;
     }
 
-    auto commands = Serializer::read_commands(ifs);
+    auto parse_res = Serializer::read_commands_checked(ifs);
+    if (!parse_res.success) {
+        std::cerr << "Error: Malformed command on line " << parse_res.error->line_number
+                  << ": " << parse_res.error->message << "\n";
+        std::cerr << "Offending line: \"" << parse_res.error->line_content << "\"\n";
+        return 2;
+    }
+
+    const auto& commands = parse_res.commands;
     std::cout << "Loaded " << commands.size() << " commands from " << in_path << "\n";
 
     OrderBook book;
@@ -194,12 +209,16 @@ int run_replay(int argc, char* argv[]) {
     std::vector<Event> step_events;
     InvariantChecker::LifecycleAuditor auditor;
 
+    std::string events_stream_content;
+
     auto t0 = std::chrono::steady_clock::now();
     for (const auto& cmd : commands) {
         step_events.clear();
         book.process(cmd, step_events);
 
         for (const auto& ev : step_events) {
+            std::string ev_json = Serializer::to_json(ev);
+            events_stream_content += ev_json + "\n";
             if (!events_out_path.empty()) {
                 all_events.push_back(ev);
             }
@@ -211,7 +230,8 @@ int run_replay(int argc, char* argv[]) {
         if (verify) {
             auto inv = InvariantChecker::check_book_invariants(book);
             if (!inv.ok) {
-                std::cerr << "Invariant violation during replay: " << inv.message << "\n";
+                std::cerr << "Invariant violation during replay on command seq " << get_seq_num(cmd)
+                          << ": " << inv.message << "\n";
                 return 1;
             }
         }
@@ -233,6 +253,7 @@ int run_replay(int argc, char* argv[]) {
     }
 
     auto snapshot = book.get_snapshot();
+    std::string state_json = Serializer::to_json(snapshot);
 
     if (!state_out_path.empty()) {
         std::ofstream sofs(state_out_path);
@@ -240,9 +261,15 @@ int run_replay(int argc, char* argv[]) {
             std::cerr << "Error: cannot open state output file: " << state_out_path << "\n";
             return 1;
         }
-        sofs << Serializer::to_json(snapshot) << "\n";
+        sofs << state_json << "\n";
         std::cout << "Exported final state to " << state_out_path << "\n";
     }
+
+    // Compute canonical SHA-256 hashes
+    std::string events_hash = Sha256::hash_string(events_stream_content);
+    std::string state_hash = Sha256::hash_string(state_json + "\n");
+    std::cout << "Canonical Events SHA-256: " << events_hash << "\n";
+    std::cout << "Canonical State  SHA-256: " << state_hash << "\n";
 
     if (ascii_view) {
         std::cout << "\n" << Serializer::to_ascii_book(snapshot) << "\n";
@@ -349,64 +376,6 @@ int main(int argc, char* argv[]) {
         return run_replay(argc, argv);
     } else if (subcommand == "test-differential") {
         return run_test_differential(argc, argv);
-    } else if (subcommand == "benchmark") {
-        // Forward to benchmark runner logic or run benchmark
-        std::vector<char*> bench_args;
-        bench_args.push_back(argv[0]);
-        for (int i = 2; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--commands" && i + 1 < argc) {
-                bench_args.push_back(argv[++i]);
-            } else if (arg == "--seed" && i + 1 < argc) {
-                bench_args.push_back(argv[++i]);
-            }
-        }
-        // In benchmark command: run benchmark with the parsed arguments
-        size_t count = 500000;
-        uint64_t seed = 42;
-        for (int i = 2; i < argc; ++i) {
-            std::string arg = argv[i];
-            if (arg == "--commands" && i + 1 < argc) count = std::stoull(argv[++i]);
-            if (arg == "--seed" && i + 1 < argc) seed = std::stoull(argv[++i]);
-        }
-        std::string bench_cmd = std::string(argv[0]);
-        // Call internal benchmark logic directly
-        WorkloadConfig config;
-        config.seed = seed;
-        config.count = count;
-        config.limit_order_pct = 70;
-        config.market_order_pct = 10;
-        config.cancel_pct = 20;
-        config.ioc_limit_pct = 5;
-
-        std::cout << "Generating " << count << " benchmark commands...\n";
-        WorkloadGenerator gen(config);
-        auto commands = gen.generate();
-
-        OrderBook book;
-        std::vector<Event> event_buf;
-        event_buf.reserve(16);
-
-        // Warmup
-        for (size_t i = 0; i < std::min(size_t(10000), commands.size()); ++i) {
-            book.process(commands[i], event_buf);
-            event_buf.clear();
-        }
-        book.reset();
-
-        auto t0 = std::chrono::steady_clock::now();
-        for (const auto& cmd : commands) {
-            book.process(cmd, event_buf);
-            event_buf.clear();
-        }
-        auto t1 = std::chrono::steady_clock::now();
-
-        auto dur_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
-        double dur_s = static_cast<double>(dur_ns) / 1e9;
-        std::cout << "Throughput: " << std::fixed << std::setprecision(0)
-                  << (static_cast<double>(commands.size()) / dur_s) << " commands/sec ("
-                  << std::setprecision(3) << dur_s << " s)\n";
-        return 0;
     } else if (subcommand == "--help" || subcommand == "-h" || subcommand == "help") {
         print_help();
         return 0;
