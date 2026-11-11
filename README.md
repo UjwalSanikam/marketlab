@@ -2,119 +2,156 @@
 
 MarketLab is a deterministic exchange simulator and trading research platform engineered to study how execution latency, queue dynamics, market data failures, and pre-trade risk controls alter algorithmic strategy outcomes, fills, and portfolio survival.
 
-This repository implements **Milestone 1: The Deterministic Matching Engine Core** with comprehensive arithmetic hardening, deterministic input validation, SHA-256 reproducibility, and differential verification.
+This repository implements:
+- **Milestone 1**: The Deterministic Matching Engine Core (C++20, price-time priority, checked arithmetic, overflow hardening, strict input parsing, and canonical SHA-256 reproducibility).
+- **Milestone 2**: Deterministic Simulated Trading Session (Virtual clock and priority-queue scheduler, strategy interface, inventory-aware market maker, pre-trade atomic risk reservations, and a conservation-audited portfolio ledger).
 
 ---
 
-## 1. What Currently Works (Milestone 1 Hardened)
+## 1. Architecture Overview
 
-- **C++20 Limit Order Book Engine**:
-  - Price-time (FIFO) priority at every price level.
-  - Limit orders (GTC and IOC) and Market orders.
-  - Partial fills and resting residual quantities.
-  - Cancellation by Order ID with $O(1)$ order index unlinking.
-  - Exact integer ticks and lots with checked arithmetic (`CheckedMath`).
-  - Strict absence of floating-point arithmetic throughout the matching core.
-  - **Deterministic Overflow Protection**: Pre-checks prospective resting residuals against side and level aggregate bounds before acceptance; rejects potential overflows upfront with `QUANTITY_OVERFLOW` without emitting partial or orphan trades.
-- **Strict Input Validation & Parsing**:
-  - Validates numeric ranges with strict integer conversion (`from_chars`), disallowing decimals and trailing junk.
-  - Enforces explicit `TimeInForce` validation (`GTC` and `IOC` only; invalid strings such as `"INVALID"` trigger parse errors).
-  - Provides line-numbered error diagnostics with nonzero exit codes upon encountering malformed input.
-  - Documented file parsing policy: blank lines and `#` comment lines are intentionally ignored.
-- **Deterministic Command & Event Journal**:
-  - Strongly typed input commands (`NewOrderCommand`, `CancelOrderCommand`) with sequential numbers.
-  - Deterministic event generation (`OrderAcceptedEvent`, `TradeEvent`, `OrderCanceledEvent`, `OrderRejectedEvent`).
-  - Strict absence of nondeterministic timestamps in canonical event logs.
-  - **Canonical Binary Exports & SHA-256 Reproducibility**: Export files are written in binary mode with explicit UTF-8 and LF (`0x0A`) line endings across all platforms, preventing Windows CRLF substitution. The printed SHA-256 digests hash the exact binary bytes of the exported files, matching both internal calculations and Windows `Get-FileHash`.
-- **Auditing & Invariant Verification**:
-  - Price level order sum equals level total quantity.
-  - Book totals match constituent level totals.
-  - Strict descending order for bids and ascending order for asks.
-  - Crossed book prevention (`best_bid < best_ask` after every command).
-  - Complete lifecycle accounting: every accepted order's initial quantity reconciles identically to `filled_qty + canceled_qty + remaining_resting_qty`.
-- **Differential Testing**:
-  - Independent naive reference matcher (`ReferenceMatcher`) with brute-force flat linear search.
-  - Differential fuzzer that processes seeded random command streams and verifies 100% identical event streams and final book states.
-- **CLI & Replay Tool (`marketlab`)**:
-  - Built-in demonstration (`marketlab demo`).
-  - Synthetic deterministic workload generation (`marketlab generate`).
-  - Replay of saved command streams (`marketlab replay`).
-  - Differential testing (`marketlab test-differential`).
-  - In-memory service-time benchmark runner (`marketlab benchmark` / `marketlab_benchmark.exe`).
-- **Python Research Environment**:
-  - Python virtual environment created in `.venv` with `marketlab` installed in editable mode (`python/marketlab`).
-
----
-
-## 2. Order Semantics & Schema
-
-### Matching Rules
-1. **Execution Price**: Trades execute strictly at the **resting order's (maker's) price**.
-2. **Limit Orders (GTC)**: Crosses available liquidity at resting maker prices. Any unfilled remainder rests on the book at its limit price in FIFO order. If resting the remainder would cause aggregate side or level quantity to overflow `int64_t` max, the order is rejected upfront with `QUANTITY_OVERFLOW`.
-3. **Limit Orders (IOC)**: Crosses available liquidity up to its limit price. Any unfilled remainder is immediately canceled with `IOC_REMAINDER`.
-4. **Market Orders**: Crosses resting depth regardless of price. A market order never rests; any unfilled remainder (or full quantity if the book is empty) is immediately canceled with `MARKET_REMAINDER`. Market orders must carry price `0`.
-5. **Cancellations**: Canceling an active order immediately unlinks it and emits `OrderCanceledEvent` with `USER_REQUESTED`. Canceling an unknown ID or an order that was already filled or canceled returns deterministic `UNKNOWN_ORDER` or `ORDER_ALREADY_FILLED_OR_CANCELLED`.
-6. **Duplicate IDs**: Resubmitting an order ID that was previously used in the run returns deterministic `DUPLICATE_ORDER_ID`.
-
-### Input Command Formats (JSON Lines)
-```json
-{"type":"NEW","seq":1,"id":1001,"side":"BUY","order_type":"LIMIT","price":100,"qty":50,"tif":"GTC"}
-{"type":"NEW","seq":2,"id":1002,"side":"SELL","order_type":"MARKET","price":0,"qty":20,"tif":"IOC"}
-{"type":"CANCEL","seq":3,"id":1001}
-```
-
-### Output Event Formats (JSON Lines)
-```json
-{"event":"ACCEPTED","seq":1,"event_id":1,"id":1001,"side":"BUY","type":"LIMIT","price":100,"qty":50,"tif":"GTC"}
-{"event":"TRADE","seq":2,"event_id":2,"taker_id":1002,"maker_id":1001,"price":100,"qty":20,"taker_side":"SELL","maker_rem":30}
-{"event":"CANCELED","seq":3,"event_id":3,"id":1001,"canceled_qty":30,"reason":"USER_REQUESTED"}
-{"event":"REJECTED","seq":4,"event_id":4,"id":9999,"reason":"UNKNOWN_ORDER"}
-```
-
----
-
-## 3. Architecture & Design Choices
+MarketLab enforces complete separation between the authoritative exchange runtime and external strategy agents. Strategies cannot read or mutate the order book or ledger directly. All interactions occur across explicit, simulated network latency delays using discrete market observations and execution reports.
 
 ```text
-                  +---------------------------+
-                  |   Input Command Stream    |
-                  +-------------+-------------+
-                                |
-                                v
-                  +---------------------------+
-                  |    OrderBook Validator    |
-                  |  (CheckedMath & Overflow) |
-                  +-------------+-------------+
-                                |
-                 +--------------+--------------+
-                 |                             |
-                 v                             v
-       +-------------------+         +-------------------+
-       |    Bids (Map)     |         |    Asks (Map)     |
-       |  Price -> Level   |         |  Price -> Level   |
-       |    (std::greater) |         |    (std::less)    |
-       +---------+---------+         +---------+---------+
-                 |                             |
-                 +--------------+--------------+
-                                |
-                                v
-                  +---------------------------+
-                  |  Order Index (Hash Map)   |
-                  |  OrderId -> IndexEntry    |
-                  +-------------+-------------+
-                                |
-                                v
-                  +---------------------------+
-                  | Deterministic Event Stream|
-                  |  (with Canonical SHA-256) |
-                  +---------------------------+
+               +-------------------------------------------------------------+
+               |                  Virtual Scheduler (Min-Heap)               |
+               |       SimTime (ns), 5 Priority Tiers, FIFO Tie-Breaking     |
+               +------------------------------+------------------------------+
+                                              |
+                +-----------------------------+-----------------------------+
+                |                                                           |
+                v                                                           v
++-------------------------------+                           +-------------------------------+
+|       Market Observations     |                           |    Inventory Market Maker     |
+|   (BBO, Mid, Last Trade)      |                           |   (Avellaneda-Stoikov Skew)   |
++---------------+---------------+                           +---------------+---------------+
+                | [market_data_delay]                                       | [strategy_delay]
+                +------------------------------>+                           v
+                                                |             +-----------------------------+
+                                                |             |   Order / Cancel Intents    |
+                                                |             +--------------+--------------+
+                                                |                            | [order_entry_delay]
+                                                v                            v
+               +----------------------------------------------------------------------------+
+               |                       Pre-Trade Risk Engine & Atomic Ledger                |
+               |  - Order Qty & Notional Caps          - Conservative Buy Cash Reservation  |
+               |  - Strict Short-Selling Prohibition   - Market Buy Protection Price Cap    |
+               |  - Stale Data Gating (Age Limit)      - Self-Trade Prevention (STP)        |
+               +-------------------------------------+--------------------------------------+
+                                                     | (If Approved)
+                                                     v
+                                    +---------------------------------+
+                                    |     C++20 Matching Engine       |
+                                    |   (Price-Time FIFO Priority)    |
+                                    +----------------+----------------+
+                                                     |
+                        +----------------------------+----------------------------+
+                        |                                                         |
+                        v                                                         v
+         +-----------------------------+                           +-----------------------------+
+         |     Authoritative Ledger    |                           |      Execution Reports      |
+         |  - Trade Settlement at Tex  |                           |  (Accepted, Rejected, Trade)|
+         |  - Cash/Inventory Conserve  |                           +--------------+--------------+
+         |  - Maker/Taker Fee Split    |                                          | [exec_report_delay]
+         |  - Avg Cost & Realized PnL  |                                          v
+         +-----------------------------+                           +-----------------------------+
+                                                                   |      Strategy Updates       |
+                                                                   +-----------------------------+
 ```
 
-1. **Price Levels**: `std::map<Price, PriceLevel, std::greater<Price>>` for Bids and `std::map<Price, PriceLevel, std::less<Price>>` for Asks.
-2. **Order Queues**: `std::list<RestingOrder>` inside each level guarantees iterator stability upon insertions and removals.
-3. **Order Index**: `std::unordered_map<OrderId, IndexEntry>` enables $O(1)$ order lookup and list unlinking on cancellation or partial fill.
-4. **Empty Level Pruning**: Levels whose constituent orders are fully depleted are immediately removed from the map.
-5. **Checked Integer Arithmetic**: `CheckedMath` guards against overflow, underflow, and negative values across individual orders, price levels, book aggregates, and lifecycle audits.
+---
+
+## 2. Milestone 2 Capabilities
+
+### 1. Virtual Clock & Deterministic Min-Heap Event Scheduler
+- **Time Representation**: Pure integer simulated nanoseconds (`SimTime`), with checked arithmetic guarding against overflow. Wall-clock timing is prohibited in canonical simulation data.
+- **Priority Queue**: Stable min-heap ordered by `(timestamp, priority_tier, sequence_id)`.
+- **Deterministic Tie-Breaking**: Equal-timestamp events are strictly ordered by documented priority tiers, followed by FIFO sequence ID:
+  1. `Tier 1 (MarketDataDelivery)`: Market observations delivered to strategy mailboxes.
+  2. `Tier 2 (StrategyWakeup)`: Strategy periodic wakeups and timer hooks.
+  3. `Tier 3 (OrderAdmission)`: Strategy order submissions and cancellations arriving at the runtime.
+  4. `Tier 4 (ExecutionReportDelivery)`: Delayed fill reports, cancels, and risk rejections delivered to strategies.
+  5. `Tier 5 (BackgroundArrival)`: External counterparty order flow injection.
+- **Run Horizon & Loop Guards**: Prevents unbounded same-time loops with explicit run horizons (`run_horizon_ns`), event count limits (`max_events`), and explicit termination reasons (`TimeHorizonReached`, `EventLimitReached`, `AllEventsProcessed`).
+
+### 2. Strategy Interface & Inventory-Aware Market Maker
+- **Strategy Interface (`IStrategy`, `IStrategyContext`)**:
+  - Receives only delivered `MarketObservation` records and `ExecutionReport` events.
+  - Submits order and cancellation intents through the runtime context.
+  - Has zero direct access to the order book, counterparties, or authoritative balances.
+- **Inventory-Aware Market Maker (`InventoryAwareMarketMaker`)**:
+  - Calculates reservation price skewed by inventory deviation:
+    $$\text{Price}_{\text{reservation}} = \text{Mid} - (\text{Inventory}_{\text{current}} - \text{Inventory}_{\text{target}}) \times \text{SkewPerLot}$$
+  - Places symmetric bid and ask quotes around the reservation price:
+    $$\text{Bid} = \text{Price}_{\text{reservation}} - \text{HalfSpread}, \quad \text{Ask} = \text{Price}_{\text{reservation}} + \text{HalfSpread}$$
+  - Dynamically updates active resting quotes and cancels stale quotes.
+
+### 3. Pre-Trade Risk Engine & Atomic Reservations
+- **Order Size & Notional Limits**: Hard caps on single-order quantity (`max_order_qty`) and notional value (`max_order_notional`).
+- **Strict Short-Selling Prohibition**: Sell orders are rejected if requested quantity exceeds available (unreserved) inventory (`available_inventory < qty`).
+- **Conservative Cash Reservation for Buys**: To prevent overdrafts from fees, buy orders atomically reserve:
+  $$\text{ReservedCash} = \text{Notional} + \text{ConservativeTakerFee}$$
+- **Market Buy Protection Price**: Market buy orders require an explicit protection price cap to bound potential cash liability.
+- **Market Data Staleness Guard**: Orders are rejected if simulated current time exceeds the latest observation timestamp plus `max_data_age_ns`.
+- **Self-Trade Prevention (STP)**: Rejects crossing orders if the resting top-of-book order belongs to the same account.
+- **Cancel Ownership Verification**: Prevents unauthorized cancellation of orders belonging to other accounts.
+
+### 4. Portfolio Ledger & Conservation Accounting
+- **Authoritative vs. Observed Separation**: Balances and reservations are authoritatively settled at matching execution time $T_{\text{exec}}$, while the strategy's internal position representation updates only when the delayed execution report arrives at $T_{\text{exec}} + \text{execution\_report\_delay}$.
+- **Average Cost Basis & PnL**:
+  - Position cost basis updates dynamically on purchases:
+    $$\text{CostBasis}_{\text{new}} = \frac{\text{CostBasis}_{\text{prev}} \times \text{Inventory}_{\text{prev}} + \text{Notional}}{\text{Inventory}_{\text{new}}}$$
+  - Realized PnL is locked in on sales:
+    $$\text{RealizedPnL} = (\text{Price}_{\text{trade}} - \text{CostBasis}) \times \text{Quantity} - \text{Fee}_{\text{seller}}$$
+  - Mark-to-market unrealized PnL tracks valuation relative to mid-price.
+- **Strict Exact Conservation**:
+  $$\sum_{\text{accounts}} \Delta \text{Cash} = 0, \quad \sum_{\text{accounts}} \Delta \text{Inventory} = 0$$
+  Buyer cash paid equals seller cash received plus exchange fees collected. Inventory transferred out of seller equals inventory received by buyer.
+- **Duplicate Fill Idempotence**: Duplicate trade execution reports are rejected, preventing double-application.
+
+---
+
+## 3. Worked Trading Example & Balance Reconciliation
+
+Consider a session with three accounts: Buyer (`ALICE`), Seller (`BOB`), and `EXCHANGE_FEES`. Fee rates are 10 bps maker (0.10%) and 20 bps taker (0.20%).
+
+```text
+Initial Balances:
+  ALICE:          Cash = 10,000, Inventory =   0
+  BOB:            Cash =      0, Inventory = 100
+  EXCHANGE_FEES:  Cash =      0, Inventory =   0
+  Total System:   Cash = 10,000, Inventory = 100
+```
+
+1. **Order 1 (Alice Limit Buy)**: Alice submits Buy 10 @ 100 (GTC).
+   - Notional = 1,000. Conservative taker fee = $1,000 \times 20 / 10,000 = 2$.
+   - Pre-trade risk reserves 1,002 cash. Alice available cash becomes 8,998. Order rests at 100.
+2. **Order 2 (Bob Crossing Sell)**: Bob submits Sell 10 @ 100 (IOC).
+   - Pre-trade risk checks Bob inventory ($10 \le 100$); reserves 10 inventory. Bob available inventory becomes 90.
+3. **Execution & Settlement ($T_{\text{exec}}$)**:
+   - Matcher crosses orders at resting price 100.
+   - Trade: 10 lots @ 100 = 1,000 notional.
+   - Taker (Bob) fee = $1,000 \times 20 / 10,000 = 2$.
+   - Maker (Alice) fee = $1,000 \times 10 / 10,000 = 1$.
+   - Alice cash deducted: $1,000 + 1 = 1,001$. Alice inventory: $+10$.
+   - Bob cash credited: $1,000 - 2 = 998$. Bob inventory: $-10$.
+   - Fee account cash credited: $1 + 2 = 3$.
+
+### Balance Table
+
+| Account | Metric | Before Trade | Reservation | After Trade & Settlement | Net Change |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **ALICE** (Buyer/Maker) | Cash | 10,000 | 1,002 reserved (8,998 avail) | 8,999 (0 reserved) | **-1,001** |
+| | Inventory | 0 | 0 | 10 | **+10** |
+| | Avg Cost Basis | 0.0 | - | 100.0 | - |
+| | Fees Paid | 0 | - | 1 | +1 |
+| **BOB** (Seller/Taker) | Cash | 0 | 0 | 998 | **+998** |
+| | Inventory | 100 | 10 reserved (90 avail) | 90 (0 reserved) | **-10** |
+| | Fees Paid | 0 | - | 2 | +2 |
+| **EXCHANGE_FEES** | Cash | 0 | 0 | 3 | **+3** |
+| | Inventory | 0 | 0 | 0 | 0 |
+| **Total System** | **Cash** | **10,000** | - | **10,000** | **0 (Conserved)** |
+| | **Inventory** | **100** | - | **100** | **0 (Conserved)** |
 
 ---
 
@@ -130,135 +167,164 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
 # Configure Release build with Clang and Ninja
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-# Build all targets (core library, CLI, test suite, regressions, benchmark)
+# Build all targets (core library, CLI, tests, regressions, benchmark)
 cmake --build build
 ```
 
-### Run Automated Tests & Regression Suite
+### Run Full Test Suite via CTest
 ```powershell
-# Run the complete test suite and hardening regression checks via CTest
 ctest --test-dir build --output-on-failure
-
-# Or run executables directly:
-.\build\marketlab_tests.exe
-.\build\marketlab_regressions.exe
 ```
-All unit tests, differential tests, and hardening regression tests pass with 100% success.
+Outputs:
+```text
+Test project D:/finance/build
+    Start 1: AllTests
+1/3 Test #1: AllTests .........................   Passed    0.02 sec
+    Start 2: RegressionTests
+2/3 Test #2: RegressionTests ..................   Passed    0.01 sec
+    Start 3: SimTests
+3/3 Test #3: SimTests .........................   Passed    0.01 sec
+
+100% tests passed out of 3
+```
+
+Direct executables:
+- `.\build\marketlab_tests.exe`: Milestone 1 engine tests (FIFO priority, partial fills, cancellations).
+- `.\build\marketlab_regressions.exe`: Milestone 1 hardening regression tests (quantity overflow, invalid TIF, malformed inputs).
+- `.\build\marketlab_sim_tests.exe`: Milestone 2 simulation tests (tie-breaking, cash competition, short-selling prevention, fees, PnL, latencies, and SHA-256 reproducibility).
 
 ---
 
-## 5. CLI Commands & Demonstration
+## 5. CLI Usage & Simulated Session Demonstration
 
-### 1. Interactive Demo
-Demonstrates FIFO priority, multi-level sweeps, partial fills, cancellations, deterministic rejections, and quantity overflow guards:
+### 1. Run Interactive Simulation Demo
+Runs an end-to-end simulated trading session with the inventory-aware market maker quoting around a dynamic midpoint:
 ```powershell
-.\build\marketlab.exe demo
-```
-
-### 2. Generate Synthetic Workload
-Generates a deterministic synthetic stream of orders from a seed:
-```powershell
-.\build\marketlab.exe generate --seed 42 --count 10000 --output commands.jsonl
-```
-
-### 3. Replay Workload with SHA-256 Hashes & Invariant Audit
-Replays a saved command stream, exports events and state in binary mode (strict UTF-8/LF), reports canonical SHA-256 hashes matching `Get-FileHash`, and verifies all invariants:
-```powershell
-.\build\marketlab.exe replay --input scratch/review/overflow.jsonl --events-out events.jsonl --state-out state.json --verify
+.\build\marketlab.exe sim --demo
 ```
 Example Output:
 ```text
-Loaded 2 commands from scratch/review/overflow.jsonl
-Replay completed in 28 us (71428.6 cmds/sec)
-Exported 2 events to events.jsonl
-Exported final state to state.json
-Canonical Events SHA-256: 9ebfd2fd9cb1c1895fb642effd23e446f8cbaffdd9de2175f342e4b3842bbc71
-Canonical State  SHA-256: 80420a419497fc64066ccb846a30620ead3e7edbc4b5685b2120f363cc5d4fee
-Audit verification: ALL INVARIANTS AND RECONCILIATIONS PASSED!
-```
-Verification via Windows PowerShell:
-```powershell
-(Get-FileHash events.jsonl -Algorithm SHA256).Hash -eq "9EBFD2FD9CB1C1895FB642EFFD23E446F8CBAFFDD9DE2175F342E4B3842BBC71"
-# Returns: True
-(Get-FileHash state.json -Algorithm SHA256).Hash -eq "80420A419497FC64066CCB846A30620EAD3E7EDBC4B5685B2120F363CC5D4FEE"
-# Returns: True
+=========================================================
+  MarketLab Milestone 2 Simulation Interactive Demo
+=========================================================
+Strategy: InventoryAwareMarketMaker (Account: MM)
+Starting Balances: 1000000 cash, 100 inventory
+Latencies: MD=5ms, Strat=2ms, OE=3ms, ER=10ms
+Simulating deterministic trading session...
+
+=========================================================
+  MarketLab Simulation Session Summary
+=========================================================
+Simulated Time:      9.945 s (9945000000 ns)
+Termination Reason:  ALL_EVENTS_PROCESSED
+Total Events:        593 events in 236 us service time
+
+--- Invariant & Conservation Auditing ---
+Cash Conservation:      [PASS] (Initial: 11000000, Final: 11000000)
+Inventory Conservation: [PASS] (Initial: 10100, Final: 10100)
+
+--- Strategy Performance (Account: MM) ---
+Orders Submitted:    69
+Orders Accepted:     69
+Risk Rejections:     0
+Trades Executed:     13
+Final Cash:          984534
+Final Inventory:     202 lots
+Realized PnL:        0
+Unrealized PnL:      5350
+Total PnL:           5350
+Trading Fees Paid:   11
+
+--- Exchange & Ledger Totals ---
+Total Trades:        13
+Total Volume Traded: 102 lots
+Total Notional:      15455
+Total Fees Accrued:  36 (Account: EXCHANGE_FEES)
+
+--- Canonical SHA-256 Hashes ---
+Events SHA-256:   072eabb6a54f3ecc7ea3d652a714d92332261b5e809a387009f42c9c529c2c94
+Fills SHA-256:    0ac8b44b4a2f40ba5e4be94fb46f2ea7e7d27d5bad55823ba7b12ef26f38d464
+State SHA-256:    910bf36d3b4894af35a579a6f96c9125aaf0ec12f9fe35c37961284f92d66746
+Manifest SHA-256: e991fb345b56babc025a29462b73bcc095aefccc6a5403e0dfde420629b48a27
+=========================================================
 ```
 
-### 4. Differential Verification Against Reference Matcher
-Executes randomized generated workloads through both the production `OrderBook` and the naive `ReferenceMatcher`, comparing every event and state:
+### 2. Export Canonical Logs & Verify with SHA-256
+Run a session exporting canonical binary logs (written in strict UTF-8 with LF `0x0A` bytes) and verify against Windows `Get-FileHash`:
 ```powershell
-.\build\marketlab.exe test-differential --seed 12345 --count 5000
+.\build\marketlab.exe sim --config data/demo_session.json `
+    --events-out sim_events.jsonl `
+    --fills-out sim_fills.jsonl `
+    --state-out sim_state.json `
+    --manifest-out sim_manifest.json `
+    --verify
+```
+Verify matching digests via PowerShell:
+```powershell
+Get-FileHash sim_events.jsonl, sim_fills.jsonl, sim_state.json, sim_manifest.json | Format-List
+```
+All digests match the printed simulation output byte-for-byte.
+
+### 3. Milestone 1 Core Commands (Preserved)
+- **Interactive Matcher Demo**: `.\build\marketlab.exe demo`
+- **Workload Generator**: `.\build\marketlab.exe generate --seed 42 --count 10000 --output commands.jsonl`
+- **Deterministic Replay**: `.\build\marketlab.exe replay --input scratch/review/overflow.jsonl --verify`
+- **Differential Fuzzing**: `.\build\marketlab.exe test-differential --seed 12345 --count 5000`
+- **In-Memory Benchmark**: `.\build\marketlab_benchmark.exe 100000 42`
+
+---
+
+## 6. Simulation Configuration Format (`data/demo_session.json`)
+
+```json
+{
+  "seed": 42,
+  "run_horizon_ns": 10000000000,
+  "max_events": 500000,
+  "instrument": {
+    "symbol": "BTC-USDT",
+    "tick_size": 1,
+    "lot_size": 1
+  },
+  "fees": {
+    "maker_fee_bps": 10,
+    "taker_fee_bps": 20,
+    "fee_account_id": "EXCHANGE_FEES"
+  },
+  "latencies": {
+    "market_data_delay_ns": 5000000,
+    "strategy_delay_ns": 2000000,
+    "order_entry_delay_ns": 3000000,
+    "execution_report_delay_ns": 10000000
+  },
+  "risk": {
+    "max_order_qty": 1000,
+    "max_order_notional": 1000000,
+    "max_inventory": 5000,
+    "max_data_age_ns": 10000000000,
+    "allow_self_trade": false
+  },
+  "strategy": {
+    "quote_size": 10,
+    "half_spread": 2,
+    "inventory_target": 100,
+    "skew_per_lot": 1,
+    "quote_interval_ns": 100000000
+  },
+  "strategy_account_id": "MM",
+  "strategy_starting_cash": 1000000,
+  "strategy_starting_inventory": 100,
+  "background_account_id": "BACKGROUND",
+  "background_starting_cash": 10000000,
+  "background_starting_inventory": 10000
+}
 ```
 
 ---
 
-## 6. In-Memory Service-Time Benchmark Results
+## 7. Next Milestones (Roadmap)
 
-The benchmark measures in-memory single-threaded service time separately from CLI JSON parsing, network stacks, and file I/O.
-
-### Environment & Calibration
-- **Platform**: Windows 11 (x86_64)
-- **Compiler**: Clang 23.1.4 (x86_64-w64-windows-gnu)
-- **Build Mode**: Release (`-O3`, `NDEBUG`, `-static`)
-- **System Timer**: `std::chrono::steady_clock` (Windows QPC)
-- **Timer Call Overhead**: ~19.9 ns / call
-- **Timer Resolution**: ~100 ns minimum observable tick
-- *Note on Latency Interpretation*: Zero-duration latency samples (`0.0 ns`) occur when a command completes faster than the timer tick resolution (< 100 ns).
-
-### Workload Outcomes (1,000,000 Commands, Seed 42)
-- **Total commands processed**: 1,000,000
-- **Accepted new orders**: 800,033
-- **Successful cancellations**: 44,142
-- **Rejected cancellations**: 155,825 (`ORDER_ALREADY_FILLED_OR_CANCELLED`: 155,825)
-- **Remainder cancellations**: 21,922 (IOC and Market order residuals)
-- **Trades executed**: 718,701
-- **Rejected new orders**: 0
-- **Active resting book at finish**: 8,012 orders (489 bid levels, 606 ask levels)
-- **Book invariant check**: PASS
-
-### Repeated Throughput Trials (5 Trials)
-- **Trial 1**: 7,953,052 commands/sec (0.1257 s)
-- **Trial 2**: 8,025,875 commands/sec (0.1246 s)
-- **Trial 3**: 8,137,849 commands/sec (0.1229 s)
-- **Trial 4**: 8,548,601 commands/sec (0.1170 s)
-- **Trial 5**: 7,817,924 commands/sec (0.1279 s)
-- **Mean Throughput**: **8,096,660 commands/sec** (~8.1M cmds/sec)
-- **Throughput Range**: [7,817,924, 8,548,601] commands/sec
-- **Standard Deviation**: +/- 248,707 commands/sec (3.07%)
-
-### Instrumented Service-Time Latency Distribution
-- **Min**: 0.0 ns
-- **Mean**: 143.4 ns
-- **p50**: 100.0 ns (0.100 µs)
-- **p90**: 200.0 ns (0.200 µs)
-- **p99**: 400.0 ns (0.400 µs)
-- **p99.9**: 1,200.0 ns (1.200 µs)
-- **Max**: 8,460.9 µs
-
-### Limitations
-- Measurements reflect pure single-threaded in-memory service time; network latency and serialization overhead are excluded.
-- The current Milestone 1 book uses node-based `std::map` and `std::list`. Tail latency reflects maximum observed duration including OS thread scheduling jitter and memory allocation pauses.
-- Milestone 6 will introduce a bounded flat price ladder and order pool to eliminate tree-node dynamic allocations.
-
----
-
-## 7. Python Virtual Environment
-
-A Python virtual environment is configured at `.venv`:
-```powershell
-# Activate the virtual environment
-.\.venv\Scripts\Activate.ps1
-
-# Verify marketlab python package
-python -c "import marketlab; print(marketlab.__version__)"
-```
-
----
-
-## 8. Next Milestone (Milestone 2)
-
-Milestone 2 will introduce:
-1. Virtual clock and deterministic event scheduler.
-2. Market maker baseline strategy (inventory-aware).
-3. Fill ledger, portfolio cash/inventory tracking, and pre-trade reservation controls.
-4. End-to-end simulated trading loop with zero wall-clock dependencies.
+- **Milestone 3**: Historical Market Data Replay & Data Ingestion Pipeline (Parquet / L2 books, synthetic noise injection, clock synchronization).
+- **Milestone 4**: Event-Driven Backtester & Execution Model Calibration (fill simulation models, adverse selection, market impact modeling).
+- **Milestone 5**: Real-Time Streaming & Fault Injection (WebSocket / IPC feeds, dropped packet emulation, network partitions, queue delay distributions).
+- **Milestone 6**: High-Performance Architecture Optimization (flat price-ladder, memory pools, zero-allocation ring buffers, SIMD-accelerated book ops).

@@ -1,0 +1,41 @@
+{
+  "seed": 42,
+  "run_horizon_ns": 10000000000,
+  "max_events": 500000,
+  "instrument": {
+    "symbol": "BTC-USDT",
+    "tick_size": 1,
+    "lot_size": 1
+  },
+  "fees": {
+    "maker_fee_bps": 10,
+    "taker_fee_bps": 20,
+    "fee_account_id": "EXCHANGE_FEES"
+  },
+  "latencies": {
+    "market_data_delay_ns": 5000000,
+    "strategy_delay_ns": 2000000,
+    "order_entry_delay_ns": 3000000,
+    "execution_report_delay_ns": 10000000
+  },
+  "risk": {
+    "max_order_qty": 1000,
+    "max_order_notional": 1000000,
+    "max_inventory": 5000,
+    "max_data_age_ns": 10000000000,
+    "allow_self_trade": false
+  },
+  "strategy": {
+    "quote_size": 10,
+    "half_spread": 2,
+    "inventory_target": 100,
+    "skew_per_lot": 1,
+    "quote_interval_ns": 100000000
+  },
+  "strategy_account_id": "MM",
+  "strategy_starting_cash": 1000000,
+  "strategy_starting_inventory": 100,
+  "background_account_id": "BACKGROUND",
+  "background_starting_cash": 10000000,
+  "background_starting_inventory": 10000
+}

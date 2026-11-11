@@ -25,6 +25,9 @@ add_library(marketlab_core
     src/workload_generator.cpp
     src/serializer.cpp
     src/invariants.cpp
+    src/portfolio.cpp
+    src/strategy.cpp
+    src/simulation_engine.cpp
 )
 
 target_include_directories(marketlab_core PUBLIC
@@ -45,6 +48,10 @@ add_test(NAME AllTests COMMAND marketlab_tests)
 add_executable(marketlab_regressions tests/test_regressions.cpp)
 target_link_libraries(marketlab_regressions PRIVATE marketlab_core)
 add_test(NAME RegressionTests COMMAND marketlab_regressions)
+
+add_executable(marketlab_sim_tests tests/test_simulation.cpp)
+target_link_libraries(marketlab_sim_tests PRIVATE marketlab_core)
+add_test(NAME SimTests COMMAND marketlab_sim_tests)
 
 # Benchmark executable
 add_executable(marketlab_benchmark benchmarks/benchmark.cpp)

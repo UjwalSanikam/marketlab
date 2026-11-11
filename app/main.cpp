@@ -12,6 +12,7 @@
 #include "marketlab/serializer.hpp"
 #include "marketlab/invariants.hpp"
 #include "marketlab/sha256.hpp"
+#include "marketlab/simulation_engine.hpp"
 
 using namespace marketlab;
 
@@ -44,7 +45,17 @@ void print_help() {
     std::cout << "      Run in-memory service-time benchmark.\n";
     std::cout << "      Options:\n";
     std::cout << "        --commands <num>   Command count (default: 500000)\n";
-    std::cout << "        --seed <num>       RNG seed (default: 42)\n";
+    std::cout << "        --seed <num>       RNG seed (default: 42)\n\n";
+    std::cout << "  marketlab sim [options]\n";
+    std::cout << "      Run a deterministic simulated trading session with strategy execution, risk checks, and portfolio accounting.\n";
+    std::cout << "      Options:\n";
+    std::cout << "        --config <file>    Simulation config JSON file (default: built-in demo config)\n";
+    std::cout << "        --events-out <f>   Export canonical events log (JSONL)\n";
+    std::cout << "        --fills-out <f>    Export canonical fills/trades log (JSONL)\n";
+    std::cout << "        --state-out <f>    Export final portfolio & book state (JSON)\n";
+    std::cout << "        --manifest-out <f> Export simulation run manifest (JSON)\n";
+    std::cout << "        --verify           Enforce cash and inventory conservation checks (exit 1 if failed)\n";
+    std::cout << "        --demo             Run interactive verbose demo session\n";
 }
 
 int run_demo() {
@@ -378,6 +389,186 @@ int run_test_differential(int argc, char* argv[]) {
     return 0;
 }
 
+int run_sim(int argc, char* argv[]) {
+    std::string config_path;
+    std::string events_out_path;
+    std::string fills_out_path;
+    std::string state_out_path;
+    std::string manifest_out_path;
+    bool verify = false;
+    bool demo_mode = false;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--config" && i + 1 < argc) {
+            config_path = argv[++i];
+        } else if (arg == "--events-out" && i + 1 < argc) {
+            events_out_path = argv[++i];
+        } else if (arg == "--fills-out" && i + 1 < argc) {
+            fills_out_path = argv[++i];
+        } else if (arg == "--state-out" && i + 1 < argc) {
+            state_out_path = argv[++i];
+        } else if (arg == "--manifest-out" && i + 1 < argc) {
+            manifest_out_path = argv[++i];
+        } else if (arg == "--verify") {
+            verify = true;
+        } else if (arg == "--demo") {
+            demo_mode = true;
+        }
+    }
+
+    std::string config_content;
+    SimulationConfig config;
+
+    if (!config_path.empty()) {
+        std::ifstream cfs(config_path);
+        if (!cfs.is_open()) {
+            std::cerr << "Error: cannot open configuration file: " << config_path << "\n";
+            return 1;
+        }
+        std::stringstream buffer;
+        buffer << cfs.rdbuf();
+        config_content = buffer.str();
+        config = SimulationConfig::from_json(config_content);
+    } else {
+        std::ifstream cfs("data/demo_session.json");
+        if (cfs.is_open()) {
+            std::stringstream buffer;
+            buffer << cfs.rdbuf();
+            config_content = buffer.str();
+            config = SimulationConfig::from_json(config_content);
+        } else {
+            config_content = config.to_json();
+        }
+    }
+
+    if (demo_mode) {
+        std::cout << "=========================================================\n";
+        std::cout << "  MarketLab Milestone 2 Simulation Interactive Demo\n";
+        std::cout << "=========================================================\n";
+        std::cout << "Strategy: InventoryAwareMarketMaker (Account: " << config.strategy_account_id << ")\n";
+        std::cout << "Starting Balances: " << config.strategy_starting_cash << " cash, "
+                  << config.strategy_starting_inventory << " inventory\n";
+        std::cout << "Latencies: MD=" << (config.latencies.market_data_delay / 1000000.0) << "ms, Strat="
+                  << (config.latencies.strategy_delay / 1000000.0) << "ms, OE="
+                  << (config.latencies.order_entry_delay / 1000000.0) << "ms, ER="
+                  << (config.latencies.execution_report_delay / 1000000.0) << "ms\n";
+        std::cout << "Simulating deterministic trading session...\n\n";
+    }
+
+    SimulationEngine engine(config);
+    engine.setup_synthetic_scenario();
+
+    auto t0 = std::chrono::steady_clock::now();
+    auto summary = engine.run();
+    auto t1 = std::chrono::steady_clock::now();
+
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+    // Export canonical files if requested
+    if (!events_out_path.empty()) {
+        if (!engine.export_events_binary(events_out_path)) {
+            std::cerr << "Error: Failed to export events to " << events_out_path << "\n";
+            return 1;
+        }
+    }
+    if (!fills_out_path.empty()) {
+        if (!engine.export_fills_binary(fills_out_path)) {
+            std::cerr << "Error: Failed to export fills to " << fills_out_path << "\n";
+            return 1;
+        }
+    }
+    if (!state_out_path.empty()) {
+        if (!engine.export_state_binary(state_out_path)) {
+            std::cerr << "Error: Failed to export state to " << state_out_path << "\n";
+            return 1;
+        }
+    }
+    if (!manifest_out_path.empty()) {
+        if (!engine.export_manifest_binary(manifest_out_path, config_content)) {
+            std::cerr << "Error: Failed to export manifest to " << manifest_out_path << "\n";
+            return 1;
+        }
+    }
+
+    // Compute canonical SHA-256 hashes of exact bytes
+    std::string events_hash = !events_out_path.empty()
+        ? Sha256::hash_file(events_out_path).value_or("")
+        : Sha256::hash_string(engine.get_events_content());
+
+    std::string fills_hash = !fills_out_path.empty()
+        ? Sha256::hash_file(fills_out_path).value_or("")
+        : Sha256::hash_string(engine.get_fills_content());
+
+    std::string state_hash = !state_out_path.empty()
+        ? Sha256::hash_file(state_out_path).value_or("")
+        : Sha256::hash_string(engine.get_state_content());
+
+    std::string manifest_hash = !manifest_out_path.empty()
+        ? Sha256::hash_file(manifest_out_path).value_or("")
+        : Sha256::hash_string(engine.get_manifest_content(config_content));
+
+    std::cout << "=========================================================\n";
+    std::cout << "  MarketLab Simulation Session Summary\n";
+    std::cout << "=========================================================\n";
+    std::cout << "Simulated Time:      " << (summary.simulated_time_ns / 1000000000.0) << " s ("
+              << summary.simulated_time_ns << " ns)\n";
+    std::cout << "Termination Reason:  " << to_string(summary.termination_reason) << "\n";
+    std::cout << "Total Events:        " << summary.total_events_processed << " events in "
+              << elapsed_us << " us service time\n\n";
+
+    std::cout << "--- Invariant & Conservation Auditing ---\n";
+    std::cout << "Cash Conservation:      " << (summary.cash_conserved ? "[PASS]" : "[FAIL]")
+              << " (Initial: " << summary.initial_total_cash << ", Final: " << summary.final_total_cash << ")\n";
+    std::cout << "Inventory Conservation: " << (summary.inventory_conserved ? "[PASS]" : "[FAIL]")
+              << " (Initial: " << summary.initial_total_inventory << ", Final: " << summary.final_total_inventory << ")\n\n";
+
+    std::cout << "--- Strategy Performance (Account: " << config.strategy_account_id << ") ---\n";
+    std::cout << "Orders Submitted:    " << summary.strategy_orders_submitted << "\n";
+    std::cout << "Orders Accepted:     " << summary.strategy_orders_accepted << "\n";
+    std::cout << "Risk Rejections:     " << summary.strategy_risk_rejections << "\n";
+    std::cout << "Trades Executed:     " << summary.strategy_trades << "\n";
+    std::cout << "Final Cash:          " << summary.strategy_final_cash << "\n";
+    std::cout << "Final Inventory:     " << summary.strategy_final_inventory << " lots\n";
+    std::cout << "Realized PnL:        " << summary.strategy_realized_pnl << "\n";
+    if (summary.strategy_unrealized_pnl) {
+        std::cout << "Unrealized PnL:      " << *summary.strategy_unrealized_pnl << "\n";
+        std::cout << "Total PnL:           " << *summary.strategy_total_pnl << "\n";
+    }
+    std::cout << "Trading Fees Paid:   " << summary.strategy_fees_paid << "\n\n";
+
+    std::cout << "--- Exchange & Ledger Totals ---\n";
+    std::cout << "Total Trades:        " << summary.total_trades << "\n";
+    std::cout << "Total Volume Traded: " << summary.total_volume_traded << " lots\n";
+    std::cout << "Total Notional:      " << summary.total_notional_traded << "\n";
+    std::cout << "Total Fees Accrued:  " << summary.total_fees_collected << " (Account: " << config.fees.fee_account_id << ")\n\n";
+
+    std::cout << "--- Canonical SHA-256 Hashes ---\n";
+    std::cout << "Events SHA-256:   " << events_hash;
+    if (!events_out_path.empty()) std::cout << "  (" << events_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Fills SHA-256:    " << fills_hash;
+    if (!fills_out_path.empty()) std::cout << "  (" << fills_out_path << ")";
+    std::cout << "\n";
+    std::cout << "State SHA-256:    " << state_hash;
+    if (!state_out_path.empty()) std::cout << "  (" << state_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Manifest SHA-256: " << manifest_hash;
+    if (!manifest_out_path.empty()) std::cout << "  (" << manifest_out_path << ")";
+    std::cout << "\n";
+    std::cout << "=========================================================\n";
+
+    if (verify) {
+        if (!summary.cash_conserved || !summary.inventory_conserved) {
+            std::cerr << "Verification error: Conservation check failed!\n";
+            return 1;
+        }
+        std::cout << "Audit verification: ALL MONETARY & INVENTORY CONSERVATION CHECKS PASSED!\n";
+    }
+
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         print_help();
@@ -394,6 +585,8 @@ int main(int argc, char* argv[]) {
         return run_replay(argc, argv);
     } else if (subcommand == "test-differential") {
         return run_test_differential(argc, argv);
+    } else if (subcommand == "sim") {
+        return run_sim(argc, argv);
     } else if (subcommand == "--help" || subcommand == "-h" || subcommand == "help") {
         print_help();
         return 0;
