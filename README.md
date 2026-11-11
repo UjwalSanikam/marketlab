@@ -252,7 +252,7 @@ Total Fees Accrued:  36 (Account: EXCHANGE_FEES)
 Events SHA-256:   072eabb6a54f3ecc7ea3d652a714d92332261b5e809a387009f42c9c529c2c94
 Fills SHA-256:    0ac8b44b4a2f40ba5e4be94fb46f2ea7e7d27d5bad55823ba7b12ef26f38d464
 State SHA-256:    3ff7eadcb1792931e2ec00125efd5eda203d5b772084146b9f36bfe47a0826bb
-Manifest SHA-256: de45f9781553881ae80dc8fd20e2018dabfe14dd5f68793e170677c8b46de906
+Manifest SHA-256: 3e2dbd3ec95802708f0d0edad56216186d182d7988e03a69c104526011fc12f2
 =========================================================
 ```
 
