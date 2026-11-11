@@ -25,7 +25,7 @@ This repository implements **Milestone 1: The Deterministic Matching Engine Core
   - Strongly typed input commands (`NewOrderCommand`, `CancelOrderCommand`) with sequential numbers.
   - Deterministic event generation (`OrderAcceptedEvent`, `TradeEvent`, `OrderCanceledEvent`, `OrderRejectedEvent`).
   - Strict absence of nondeterministic timestamps in canonical event logs.
-  - Built-in **SHA-256 hash generation** for event streams and final state snapshots.
+  - **Canonical Binary Exports & SHA-256 Reproducibility**: Export files are written in binary mode with explicit UTF-8 and LF (`0x0A`) line endings across all platforms, preventing Windows CRLF substitution. The printed SHA-256 digests hash the exact binary bytes of the exported files, matching both internal calculations and Windows `Get-FileHash`.
 - **Auditing & Invariant Verification**:
   - Price level order sum equals level total quantity.
   - Book totals match constituent level totals.
@@ -162,9 +162,26 @@ Generates a deterministic synthetic stream of orders from a seed:
 ```
 
 ### 3. Replay Workload with SHA-256 Hashes & Invariant Audit
-Replays a saved command stream, exports events and state, reports canonical SHA-256 hashes, and verifies all invariants:
+Replays a saved command stream, exports events and state in binary mode (strict UTF-8/LF), reports canonical SHA-256 hashes matching `Get-FileHash`, and verifies all invariants:
 ```powershell
-.\build\marketlab.exe replay --input commands.jsonl --events-out events.jsonl --state-out state.json --ascii --verify
+.\build\marketlab.exe replay --input scratch/review/overflow.jsonl --events-out events.jsonl --state-out state.json --verify
+```
+Example Output:
+```text
+Loaded 2 commands from scratch/review/overflow.jsonl
+Replay completed in 28 us (71428.6 cmds/sec)
+Exported 2 events to events.jsonl
+Exported final state to state.json
+Canonical Events SHA-256: 9ebfd2fd9cb1c1895fb642effd23e446f8cbaffdd9de2175f342e4b3842bbc71
+Canonical State  SHA-256: 80420a419497fc64066ccb846a30620ead3e7edbc4b5685b2120f363cc5d4fee
+Audit verification: ALL INVARIANTS AND RECONCILIATIONS PASSED!
+```
+Verification via Windows PowerShell:
+```powershell
+(Get-FileHash events.jsonl -Algorithm SHA256).Hash -eq "9EBFD2FD9CB1C1895FB642EFFD23E446F8CBAFFDD9DE2175F342E4B3842BBC71"
+# Returns: True
+(Get-FileHash state.json -Algorithm SHA256).Hash -eq "80420A419497FC64066CCB846A30620EAD3E7EDBC4B5685B2120F363CC5D4FEE"
+# Returns: True
 ```
 
 ### 4. Differential Verification Against Reference Matcher

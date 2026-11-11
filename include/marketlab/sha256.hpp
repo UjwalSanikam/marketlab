@@ -6,6 +6,8 @@
 #include <iomanip>
 #include <sstream>
 #include <array>
+#include <fstream>
+#include <optional>
 
 namespace marketlab {
 
@@ -13,6 +15,16 @@ class Sha256 {
 public:
     static std::string hash_string(const std::string& input) {
         return hash_bytes(reinterpret_cast<const uint8_t*>(input.data()), input.size());
+    }
+
+    static std::optional<std::string> hash_file(const std::string& path) {
+        std::ifstream ifs(path, std::ios::binary);
+        if (!ifs.is_open()) return std::nullopt;
+        std::vector<uint8_t> buffer(
+            (std::istreambuf_iterator<char>(ifs)),
+            std::istreambuf_iterator<char>()
+        );
+        return hash_bytes(buffer.data(), buffer.size());
     }
 
     static std::string hash_bytes(const uint8_t* data, size_t len) {

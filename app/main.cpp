@@ -146,12 +146,13 @@ int run_generate(int argc, char* argv[]) {
     auto commands = gen.generate();
 
     if (!out_path.empty()) {
-        std::ofstream ofs(out_path);
+        std::ofstream ofs(out_path, std::ios::binary);
         if (!ofs.is_open()) {
             std::cerr << "Error: cannot open output file: " << out_path << "\n";
             return 1;
         }
         Serializer::write_commands(ofs, commands);
+        ofs.flush();
         std::cout << "Successfully generated " << commands.size()
                   << " commands (seed=" << config.seed << ") to " << out_path << "\n";
     } else {
@@ -243,31 +244,48 @@ int run_replay(int argc, char* argv[]) {
               << (commands.size() * 1000000.0 / (elapsed_us > 0 ? elapsed_us : 1)) << " cmds/sec)\n";
 
     if (!events_out_path.empty()) {
-        std::ofstream eofs(events_out_path);
+        std::ofstream eofs(events_out_path, std::ios::binary);
         if (!eofs.is_open()) {
             std::cerr << "Error: cannot open events output file: " << events_out_path << "\n";
             return 1;
         }
         Serializer::write_events(eofs, all_events);
+        eofs.flush();
         std::cout << "Exported " << all_events.size() << " events to " << events_out_path << "\n";
     }
 
     auto snapshot = book.get_snapshot();
     std::string state_json = Serializer::to_json(snapshot);
+    std::string state_content = state_json + "\n";
 
     if (!state_out_path.empty()) {
-        std::ofstream sofs(state_out_path);
+        std::ofstream sofs(state_out_path, std::ios::binary);
         if (!sofs.is_open()) {
             std::cerr << "Error: cannot open state output file: " << state_out_path << "\n";
             return 1;
         }
-        sofs << state_json << "\n";
+        sofs.write(state_content.data(), state_content.size());
+        sofs.flush();
         std::cout << "Exported final state to " << state_out_path << "\n";
     }
 
-    // Compute canonical SHA-256 hashes
-    std::string events_hash = Sha256::hash_string(events_stream_content);
-    std::string state_hash = Sha256::hash_string(state_json + "\n");
+    // Compute canonical SHA-256 hashes of exact exported bytes
+    std::string events_hash;
+    if (!events_out_path.empty()) {
+        auto h = Sha256::hash_file(events_out_path);
+        events_hash = h ? *h : Sha256::hash_string(events_stream_content);
+    } else {
+        events_hash = Sha256::hash_string(events_stream_content);
+    }
+
+    std::string state_hash;
+    if (!state_out_path.empty()) {
+        auto h = Sha256::hash_file(state_out_path);
+        state_hash = h ? *h : Sha256::hash_string(state_content);
+    } else {
+        state_hash = Sha256::hash_string(state_content);
+    }
+
     std::cout << "Canonical Events SHA-256: " << events_hash << "\n";
     std::cout << "Canonical State  SHA-256: " << state_hash << "\n";
 

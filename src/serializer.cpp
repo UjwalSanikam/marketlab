@@ -346,13 +346,17 @@ std::vector<Command> Serializer::read_commands(std::istream& is) {
 
 void Serializer::write_commands(std::ostream& os, const std::vector<Command>& commands) {
     for (const auto& cmd : commands) {
-        os << to_json(cmd) << "\n";
+        std::string s = to_json(cmd);
+        os.write(s.data(), s.size());
+        os.put('\n');
     }
 }
 
 void Serializer::write_events(std::ostream& os, const std::vector<Event>& events) {
     for (const auto& ev : events) {
-        os << to_json(ev) << "\n";
+        std::string s = to_json(ev);
+        os.write(s.data(), s.size());
+        os.put('\n');
     }
 }
 

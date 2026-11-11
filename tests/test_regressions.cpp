@@ -9,6 +9,7 @@
 #include "marketlab/reference_matcher.hpp"
 #include "marketlab/serializer.hpp"
 #include "marketlab/invariants.hpp"
+#include "marketlab/sha256.hpp"
 
 using namespace marketlab;
 
@@ -148,12 +149,120 @@ bool test_boundary_quantities() {
     return true;
 }
 
+bool test_file_hash_parity_and_lf_bytes() {
+    std::cout << "[RUN] test_file_hash_parity_and_lf_bytes...\n";
+
+    // Setup input commands
+    std::vector<Command> commands = {
+        NewOrderCommand{1, 1, Side::Buy, OrderType::Limit, 100, 9223372036854775807LL, TimeInForce::GTC},
+        NewOrderCommand{2, 2, Side::Buy, OrderType::Limit, 100, 1, TimeInForce::GTC}
+    };
+
+    auto run_replay_to_disk = [](const std::vector<Command>& cmds,
+                                 const std::string& ev_path,
+                                 const std::string& st_path,
+                                 std::string& out_mem_ev_hash,
+                                 std::string& out_mem_st_hash) -> bool {
+        OrderBook book;
+        std::vector<Event> all_events;
+        std::vector<Event> step_events;
+        std::string mem_events_str;
+
+        for (const auto& cmd : cmds) {
+            step_events.clear();
+            book.process(cmd, step_events);
+            for (const auto& ev : step_events) {
+                all_events.push_back(ev);
+                mem_events_str += Serializer::to_json(ev) + "\n";
+            }
+        }
+
+        // Write events in binary mode with explicit LF
+        std::ofstream eofs(ev_path, std::ios::binary);
+        if (!eofs.is_open()) return false;
+        Serializer::write_events(eofs, all_events);
+        eofs.flush();
+        eofs.close();
+
+        // Write state in binary mode with explicit LF
+        auto snap = book.get_snapshot();
+        std::string state_str = Serializer::to_json(snap) + "\n";
+        std::ofstream sofs(st_path, std::ios::binary);
+        if (!sofs.is_open()) return false;
+        sofs.write(state_str.data(), state_str.size());
+        sofs.flush();
+        sofs.close();
+
+        out_mem_ev_hash = Sha256::hash_string(mem_events_str);
+        out_mem_st_hash = Sha256::hash_string(state_str);
+        return true;
+    };
+
+    std::string ev1 = "test_run1_events.jsonl";
+    std::string st1 = "test_run1_state.json";
+    std::string ev2 = "test_run2_events.jsonl";
+    std::string st2 = "test_run2_state.json";
+
+    std::string mem_ev_hash1, mem_st_hash1;
+    std::string mem_ev_hash2, mem_st_hash2;
+
+    REG_ASSERT(run_replay_to_disk(commands, ev1, st1, mem_ev_hash1, mem_st_hash1), "Run 1 export failed");
+    REG_ASSERT(run_replay_to_disk(commands, ev2, st2, mem_ev_hash2, mem_st_hash2), "Run 2 export failed");
+
+    // 1. Check raw bytes on disk: must contain NO \r (0x0D) carriage returns
+    auto check_no_crlf = [](const std::string& path) -> bool {
+        std::ifstream ifs(path, std::ios::binary);
+        if (!ifs.is_open()) return false;
+        char c;
+        while (ifs.get(c)) {
+            if (c == '\r') return false; // Found CR!
+        }
+        return true;
+    };
+
+    REG_ASSERT(check_no_crlf(ev1), "Events file contains Windows CRLF carriage returns");
+    REG_ASSERT(check_no_crlf(st1), "State file contains Windows CRLF carriage returns");
+
+    // 2. Hash actual bytes on disk
+    auto disk_ev_hash1 = Sha256::hash_file(ev1);
+    auto disk_st_hash1 = Sha256::hash_file(st1);
+    auto disk_ev_hash2 = Sha256::hash_file(ev2);
+    auto disk_st_hash2 = Sha256::hash_file(st2);
+
+    REG_ASSERT(disk_ev_hash1.has_value() && disk_st_hash1.has_value(), "Failed reading file hashes for run 1");
+    REG_ASSERT(disk_ev_hash2.has_value() && disk_st_hash2.has_value(), "Failed reading file hashes for run 2");
+
+    // 3. Compare disk file hash against in-memory canonical hash
+    REG_ASSERT(*disk_ev_hash1 == mem_ev_hash1, "Disk events hash does not match in-memory hash");
+    REG_ASSERT(*disk_st_hash1 == mem_st_hash1, "Disk state hash does not match in-memory hash");
+
+    // 4. Verify exact match with scratch/review/overflow.jsonl canonical digests
+    REG_ASSERT(*disk_ev_hash1 == "9ebfd2fd9cb1c1895fb642effd23e446f8cbaffdd9de2175f342e4b3842bbc71",
+               "Events hash must match canonical digest");
+    REG_ASSERT(*disk_st_hash1 == "80420a419497fc64066ccb846a30620ead3e7edbc4b5685b2120f363cc5d4fee",
+               "State hash must match canonical digest");
+
+    // 5. Verify reproducibility between run 1 and run 2
+    REG_ASSERT(*disk_ev_hash1 == *disk_ev_hash2, "Run 1 and Run 2 event file hashes differ");
+    REG_ASSERT(*disk_st_hash1 == *disk_st_hash2, "Run 1 and Run 2 state file hashes differ");
+
+    // Cleanup
+    std::remove(ev1.c_str());
+    std::remove(st1.c_str());
+    std::remove(ev2.c_str());
+    std::remove(st2.c_str());
+
+    std::cout << "[PASS] test_file_hash_parity_and_lf_bytes\n";
+    return true;
+}
+
 int main() {
     std::cout << "Running MarketLab Hardening Regression Suite...\n\n";
     bool all_ok = true;
     all_ok &= test_overflow_hardening();
     all_ok &= test_malformed_input_hardening();
     all_ok &= test_boundary_quantities();
+    all_ok &= test_file_hash_parity_and_lf_bytes();
 
     if (all_ok) {
         std::cout << "\nALL HARDENING REGRESSION TESTS PASSED SUCCESSFULLY!\n";
