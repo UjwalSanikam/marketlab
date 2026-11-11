@@ -1,0 +1,6 @@
+{"type":"DEPTH_UPDATE","time":3000050000,"exchange_time":1700000000000,"U":90,"u":95,"bids":[[6000000,110000]],"asks":[]}
+{"type":"SNAPSHOT","time":3000100000,"last_update_id":100,"bids":[[6000000,150000]],"asks":[[6001000,100000]]}
+{"type":"DEPTH_UPDATE","time":3000150000,"exchange_time":1700000000030,"U":95,"u":100,"bids":[[6000000,120000]],"asks":[]}
+{"type":"DEPTH_UPDATE","time":3000200000,"exchange_time":1700000000050,"U":98,"u":105,"bids":[[6000000,180000]],"asks":[[6001000,120000]]}
+{"type":"DEPTH_UPDATE","time":3000250000,"exchange_time":1700000000055,"U":98,"u":105,"bids":[[6000000,180000]],"asks":[[6001000,120000]]}
+{"type":"DEPTH_UPDATE","time":3000300000,"exchange_time":1700000000100,"U":106,"u":110,"bids":[[6000000,200000]],"asks":[]}

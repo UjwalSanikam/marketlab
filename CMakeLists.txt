@@ -54,6 +54,8 @@ add_library(marketlab_core
     src/portfolio.cpp
     src/strategy.cpp
     src/simulation_engine.cpp
+    src/market_data_normalizer.cpp
+    src/historical_replay_engine.cpp
 )
 
 target_include_directories(marketlab_core PUBLIC
@@ -78,6 +80,10 @@ add_test(NAME RegressionTests COMMAND marketlab_regressions)
 add_executable(marketlab_sim_tests tests/test_simulation.cpp)
 target_link_libraries(marketlab_sim_tests PRIVATE marketlab_core)
 add_test(NAME SimTests COMMAND marketlab_sim_tests)
+
+add_executable(marketlab_hist_tests tests/test_historical.cpp)
+target_link_libraries(marketlab_hist_tests PRIVATE marketlab_core)
+add_test(NAME HistTests COMMAND marketlab_hist_tests)
 
 # Benchmark executable
 add_executable(marketlab_benchmark benchmarks/benchmark.cpp)

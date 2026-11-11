@@ -1,0 +1,5 @@
+{"type":"SNAPSHOT","time":1000100000,"last_update_id":100,"bids":[[6000000,150000],[5999000,200000]],"asks":[[6001000,100000],[6002000,300000]]}
+{"type":"DEPTH_UPDATE","time":1000200000,"exchange_time":1700000000050,"U":98,"u":105,"bids":[[6000000,180000]],"asks":[[6001000,120000]]}
+{"type":"DEPTH_UPDATE","time":1000300000,"exchange_time":1700000000150,"U":106,"u":110,"bids":[[6000100,50000]],"asks":[[6000900,80000]]}
+{"type":"PUBLIC_TRADE","time":1000400000,"exchange_time":1700000000200,"trade_id":1,"price":6000900,"qty":30000,"taker_side":"BUY"}
+{"type":"DEPTH_UPDATE","time":1000500000,"exchange_time":1700000000250,"U":111,"u":115,"bids":[[6000200,100000]],"asks":[]}

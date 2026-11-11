@@ -1,0 +1,5 @@
+{"event":"REPORT","time":1000100000,"type":"REJECTED","id":20001,"side":"BUY","price":6000498,"qty":5,"rem_qty":5,"reason":"INVALID_FEED_STATE: Unsynchronized"}
+{"event":"REPORT","time":1000100000,"type":"REJECTED","id":20002,"side":"SELL","price":6000502,"qty":5,"rem_qty":5,"reason":"INVALID_FEED_STATE: Unsynchronized"}
+{"event":"REPORT","time":1000200000,"type":"ACCEPTED","id":20003,"side":"BUY","price":6000498,"qty":5,"rem_qty":5}
+{"event":"REPORT","time":1000200000,"type":"ACCEPTED","id":20004,"side":"SELL","price":6000502,"qty":5,"rem_qty":5}
+{"event":"REPORT","time":1000400000,"type":"TRADE","id":20004,"side":"SELL","price":6000502,"fill_qty":5,"rem_qty":0}

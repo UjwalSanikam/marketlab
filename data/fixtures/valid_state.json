@@ -1,0 +1,14 @@
+{
+  "feed_status": "VALID",
+  "last_update_id": 115,
+  "best_bid": 6000200,
+  "best_ask": 6000900,
+  "mid_price": 6000550,
+  "total_bid_depth": 530000,
+  "total_ask_depth": 500000,
+  "accounts": [
+    {"id":"EXCHANGE_FEES","cash":90007,"inventory":0,"reserved_cash":0,"reserved_inventory":0,"pending_buy_qty":0,"total_cost":0,"fees_paid":0,"realized_pnl":0,"avg_cost":0},
+    {"id":"HISTORICAL_MARKET","cash":99969937485,"inventory":1000000005,"reserved_cash":0,"reserved_inventory":0,"pending_buy_qty":0,"total_cost":30062515,"fees_paid":60005,"realized_pnl":0,"avg_cost":0},
+    {"id":"MM","cash":129972508,"inventory":99995,"reserved_cash":30062495,"reserved_inventory":0,"pending_buy_qty":5,"total_cost":0,"fees_paid":30002,"realized_pnl":29972508,"avg_cost":0}
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "manifest_version": "marketlab.manifest.v2",
+  "mode": "HISTORICAL_REPLAY",
+  "build_revision": "ebd0377-dirty",
+  "build_environment": "Windows x86_64, Clang 23.1.4 (https://github.com/llvm/llvm-project.git 7a941dfb2877a0b8cf30323fefa85ad019e0b0f5)",
+  "raw_input_checksum_sha256": "aa217ab15454207e484736dc03aed9ece711183bf2297108266c12e85133fcf9",
+  "instrument": {
+    "symbol": "BTCUSDT",
+    "price_scale": 2,
+    "qty_scale": 5,
+    "tick_size": 1,
+    "lot_size": 1
+  },
+  "execution_model": {
+    "version": "conservative_queue_ahead_v1",
+    "assumptions": [
+      "L2 aggregated depth does not reveal exact FIFO queue position or hidden orders",
+      "Queue ahead initialized to observed resting depth at order admission",
+      "Public trades deplete queue ahead before passive orders can fill",
+      "Public trade volume cannot fill multiple hypothetical orders beyond actual volume",
+      "Aggressive orders hypothetically consume visible depth until refreshed by subsequent depth updates",
+      "External counterparty HISTORICAL_MARKET ensures exact double-entry ledger conservation"
+    ]
+  },
+  "latencies": {
+    "market_data_delay_ns": 0,
+    "strategy_delay_ns": 0,
+    "order_entry_delay_ns": 0,
+    "execution_report_delay_ns": 0
+  },
+  "strategy_account_id": "MM"
+}

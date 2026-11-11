@@ -5,6 +5,7 @@ MarketLab is a deterministic exchange simulator and trading research platform en
 This repository implements:
 - **Milestone 1**: The Deterministic Matching Engine Core (C++20, price-time priority, checked arithmetic, overflow hardening, strict input parsing, and canonical SHA-256 reproducibility).
 - **Milestone 2**: Deterministic Simulated Trading Session (Virtual clock and priority-queue scheduler, strategy interface, inventory-aware market maker, pre-trade atomic risk reservations, and a conservation-audited portfolio ledger).
+- **Milestone 3**: Real Market-Data Capture, Reconstructed Order Book, Historical Replay, & Conservative Execution Model (Public Binance Spot BTCUSDT raw capture, exact integer decimal scaling, official snapshot synchronization, queue-ahead depletion, aggressive liquidity consumption, and double-entry conservation).
 
 ---
 
@@ -186,19 +187,22 @@ Outputs:
 ```text
 Test project D:/finance/build
     Start 1: AllTests
-1/3 Test #1: AllTests .........................   Passed    0.02 sec
+1/4 Test #1: AllTests .........................   Passed    0.03 sec
     Start 2: RegressionTests
-2/3 Test #2: RegressionTests ..................   Passed    0.01 sec
+2/4 Test #2: RegressionTests ..................   Passed    0.26 sec
     Start 3: SimTests
-3/3 Test #3: SimTests .........................   Passed    0.01 sec
+3/4 Test #3: SimTests .........................   Passed    0.03 sec
+    Start 4: HistTests
+4/4 Test #4: HistTests ........................   Passed    0.01 sec
 
-100% tests passed out of 3
+100% tests passed out of 4
 ```
 
 Direct executables:
 - `.\build\marketlab_tests.exe`: Milestone 1 engine tests (FIFO priority, partial fills, cancellations).
 - `.\build\marketlab_regressions.exe`: Milestone 1 hardening regression tests (quantity overflow, invalid TIF, malformed inputs).
 - `.\build\marketlab_sim_tests.exe`: Milestone 2 simulation tests (tie-breaking, cash competition, short-selling prevention, fees, PnL, latencies, and SHA-256 reproducibility).
+- `.\build\marketlab_hist_tests.exe`: Milestone 3 historical replay tests (snapshot sync protocol, sequence gaps, stales, deletes, queue-ahead depletion, liquidity consumption, double-entry ledger reconciliation, and bitwise repeatability).
 
 ---
 
@@ -377,9 +381,112 @@ Configuration parsing is enforced by an internal RFC 8259-compliant JSON parser 
 
 ---
 
-## 7. Next Milestones (Roadmap)
+## 7. Milestone 3: Real Market-Data Capture, Reconstruction & Historical Replay
 
-- **Milestone 3**: Historical Market Data Replay & Data Ingestion Pipeline (Parquet / L2 books, synthetic noise injection, clock synchronization).
+Milestone 3 implements end-to-end ingestion of public cryptocurrency market data, deterministic order-book reconstruction, historical strategy replay, and a conservative execution model.
+
+- **Market Data Protocol Specification**: [docs/market_data_protocol.md](docs/market_data_protocol.md)
+- **Historical Execution Model Specification**: [docs/historical_execution_model.md](docs/historical_execution_model.md)
+
+### Key Capabilities
+1. **Public Binance Spot Capture Collector**:
+   - Python-based collector (`python/marketlab/capture.py` / `marketlab capture`) connecting to Binance Spot `BTCUSDT` public endpoints (`wss://stream.binance.com:9443` and `https://api.binance.com/api/v3/depth`).
+   - Zero credentials or trading permissions required.
+   - Records monotonic receipt timestamps (`recv_mono_ns`), UTC timestamps (`recv_utc`), sequence numbers, connection lifecycle events, and bounded buffer overflow markers.
+2. **Order Book Reconstruction Protocol**:
+   - Implements the official Binance snapshot-and-delta synchronization protocol.
+   - Detects and drops stale updates ($u \le \text{lastUpdateId}$) and duplicate updates.
+   - Detects sequence gaps ($U > \text{lastUpdateId} + 1$) and marks feed status `INVALID`.
+   - Reconstructs depth levels (adds, updates, deletions for quantity `0`) without crossed books or negative quantities.
+3. **Exact Integer Decimal Arithmetic (Zero Floats)**:
+   - String-based exact integer parser (`DecimalParser`) converts prices and quantities directly to 64-bit integer ticks and lots:
+     - Price Scale: 2 (1 tick = 0.01 USDT; e.g. `"60000.50"` $\rightarrow$ `6000050`).
+     - Quantity Scale: 5 (1 lot = 0.00001 BTC; e.g. `"1.50000"` $\rightarrow$ `150000`).
+   - Automatically rejects sub-tick/sub-lot fractional amounts and non-numeric characters.
+4. **Conservative Historical Execution Adapter**:
+   - **Aggressive Orders**: Take visible resting liquidity from top-of-book depth. Hypothetically consumes liquidity across multiple price levels, resetting consumption when subsequent exchange depth updates arrive.
+   - **Passive Orders**: Join the back of the queue at the time of admission with `queue_ahead` equal to visible resting depth. Depletes `queue_ahead` strictly matching public trade prices and volumes.
+   - **Fill Capping**: Passive fills cannot exceed remaining public trade volume.
+   - **Self-Trade Prevention (STP)**: Strategy orders crossing against own resting passive orders are atomically rejected with `SELF_TRADE_PROHIBITED`.
+5. **Authoritative Double-Entry Accounting**:
+   - Uses designated counterparty `"HISTORICAL_MARKET"` to balance all trade settlements.
+   - Conserves total cash and total inventory across all accounts, verified via `Ledger::verify_all_invariants()`.
+6. **Virtual Time Causality & Canonical Exports**:
+   - Events are stepped deterministically by monotonic receipt time.
+   - Canonical binary exports (UTF-8 bytes with explicit LF `0x0A` line endings) and SHA-256 manifests guarantee bitwise cross-platform reproducibility.
+
+### Milestone 3 CLI Commands
+
+#### 1. Reconstruct Raw Capture Stream
+Normalizes raw JSONL capture data into canonical integer ticks/lots:
+```powershell
+.\build\marketlab.exe reconstruct --input data\fixtures\valid_sync.jsonl --output data\fixtures\valid_sync_norm.jsonl
+```
+Output:
+```text
+Reconstructed 5 normalized events.
+Output: data\fixtures\valid_sync_norm.jsonl
+Normalized SHA-256: aa217ab15454207e484736dc03aed9ece711183bf2297108266c12e85133fcf9
+```
+
+#### 2. Deterministic Historical Replay
+Replays normalized market data through strategy execution, risk evaluation, conservative fills, and ledger settlement:
+```powershell
+.\build\marketlab.exe replay-hist --input data\fixtures\valid_sync_norm.jsonl `
+  --events-out events.jsonl --fills-out fills.jsonl --state-out state.json --manifest-out manifest.json --verify
+```
+Output:
+```text
+=========================================================
+  MarketLab Historical Replay Summary
+=========================================================
+Feed Status:          VALID
+Final Update ID:      115
+Order Book Levels:    Bids=4, Asks=3
+Top of Book:          Bid=6000200 | Ask=6000900
+Events Processed:     20 in 48 us
+Simulated Time:       1.0005 s
+
+--- Strategy Execution (Account: MM) ---
+Orders Submitted:     4
+Orders Accepted:      2
+Risk Rejections:      2
+Aggressive Trades:    0
+Passive Trades:       1
+Total Volume Traded:  5 lots
+Realized PnL:         29972508
+Total PnL (w/ Mark):  600054969758
+Fees Paid:            30002
+
+--- Double-Entry Ledger Conservation ---
+Cash Conservation:      [PASS] (100100000000 == 100100000000)
+Inventory Conservation: [PASS] (1000100000 == 1000100000)
+
+--- Canonical SHA-256 Hashes ---
+Events SHA-256:   aa217ab15454207e484736dc03aed9ece711183bf2297108266c12e85133fcf9  (events.jsonl)
+Fills SHA-256:    33290fb5cd5d263c653838e0474dede2b16e6bf9fbc25b2ec2112c3dc06ca5db  (fills.jsonl)
+State SHA-256:    cb71799f2d857a088baf975fb3f637092d489a1945308c228d48dd799359e518  (state.json)
+Manifest SHA-256: f297172398b7ba528aad2bee9697aef7dc36c1b6c9fe276f8f4a88188e98d8ac  (manifest.json)
+=========================================================
+Audit verification: ALL CONSERVATION CHECKS PASSED!
+```
+
+#### 3. Interactive Historical Execution Demo
+Runs the built-in offline demonstration exhibiting book reconstruction, aggressive IOC sweeps across multiple ask levels, passive order placement with queue-ahead, and queue-ahead depletion from public trades:
+```powershell
+.\build\marketlab.exe demo-hist
+```
+
+#### 4. Live Market Data Capture
+Captures live public Binance Spot BTCUSDT WebSocket streaming messages and REST depth snapshots into raw JSONL:
+```powershell
+.\build\marketlab.exe capture --duration 5 --output capture_btc.jsonl
+```
+
+---
+
+## 8. Next Milestones (Roadmap)
+
 - **Milestone 4**: Event-Driven Backtester & Execution Model Calibration (fill simulation models, adverse selection, market impact modeling).
 - **Milestone 5**: Real-Time Streaming & Fault Injection (WebSocket / IPC feeds, dropped packet emulation, network partitions, queue delay distributions).
 - **Milestone 6**: High-Performance Architecture Optimization (flat price-ladder, memory pools, zero-allocation ring buffers, SIMD-accelerated book ops).

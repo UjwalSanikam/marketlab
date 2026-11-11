@@ -2,6 +2,8 @@
 .venv/
 venv/
 env/
+__pycache__/
+*.pyc
 
 # Build artifacts
 build/
