@@ -661,27 +661,75 @@ bool regression_expanded_ledger_invariants() {
 bool regression_config_strict_validation() {
     std::cout << "[RUN] regression_config_strict_validation...\n";
 
-    // 1. Invalid tick size (zero)
-    std::string bad_json_tick = "{\"instrument\": {\"tick_size\": 0}}";
-    auto [c1, err1] = SimulationConfig::from_json_strict(bad_json_tick);
-    SIM_TEST_ASSERT(!c1.has_value(), "Must reject zero tick_size");
+    // 1. Reproduction: Non-JSON plain text must fail
+    auto [c_raw, err_raw] = SimulationConfig::from_json_strict("this is not JSON");
+    SIM_TEST_ASSERT(!c_raw.has_value(), "Must reject non-JSON plain text");
 
-    // 2. Invalid run horizon (zero)
-    std::string bad_json_horizon = "{\"run_horizon_ns\": 0}";
-    auto [c2, err2] = SimulationConfig::from_json_strict(bad_json_horizon);
-    SIM_TEST_ASSERT(!c2.has_value(), "Must reject zero run_horizon_ns");
+    // 2. Malformed JSON syntax
+    auto [c_malformed1, err_m1] = SimulationConfig::from_json_strict("{ unquoted_key: 123 }");
+    SIM_TEST_ASSERT(!c_malformed1.has_value(), "Must reject unquoted keys in JSON");
+    auto [c_malformed2, err_m2] = SimulationConfig::from_json_strict("{\"key\": [1, 2, }");
+    SIM_TEST_ASSERT(!c_malformed2.has_value(), "Must reject malformed JSON array");
 
-    // 3. Invalid maker fee (negative)
-    std::string bad_json_fee = "{\"fees\": {\"maker_fee_bps\": -5}}";
-    auto [c3, err3] = SimulationConfig::from_json_strict(bad_json_fee);
-    SIM_TEST_ASSERT(!c3.has_value(), "Must reject negative fee");
+    // 3. Complete document validation: Root must be an object
+    auto [c_arr, err_arr] = SimulationConfig::from_json_strict("[1, 2, 3]");
+    SIM_TEST_ASSERT(!c_arr.has_value(), "Must reject array root");
+    auto [c_str, err_str] = SimulationConfig::from_json_strict("\"just a string\"");
+    SIM_TEST_ASSERT(!c_str.has_value(), "Must reject string root");
+    auto [c_num, err_num] = SimulationConfig::from_json_strict("42");
+    SIM_TEST_ASSERT(!c_num.has_value(), "Must reject number root");
 
-    // 4. Identical strategy and background account IDs
+    // 4. Trailing garbage after document root
+    auto [c_trail, err_trail] = SimulationConfig::from_json_strict("{\"seed\": 42} extra junk");
+    SIM_TEST_ASSERT(!c_trail.has_value(), "Must reject trailing garbage after root object");
+
+    // 5. Duplicate keys in objects
+    auto [c_dup, err_dup] = SimulationConfig::from_json_strict("{\"seed\": 42, \"seed\": 43}");
+    SIM_TEST_ASSERT(!c_dup.has_value(), "Must reject duplicate keys in object");
+    auto [c_dup_sub, err_dup_sub] = SimulationConfig::from_json_strict("{\"instrument\": {\"tick_size\": 1, \"tick_size\": 2}}");
+    SIM_TEST_ASSERT(!c_dup_sub.has_value(), "Must reject duplicate keys in nested object");
+
+    // 6. Incorrect field types
+    auto [c_t1, err_t1] = SimulationConfig::from_json_strict("{\"seed\": \"not_a_number\"}");
+    SIM_TEST_ASSERT(!c_t1.has_value(), "Must reject string for integer field 'seed'");
+    auto [c_t2, err_t2] = SimulationConfig::from_json_strict("{\"seed\": 42.5}");
+    SIM_TEST_ASSERT(!c_t2.has_value(), "Must reject floating point for integer field 'seed'");
+    auto [c_t3, err_t3] = SimulationConfig::from_json_strict("{\"instrument\": \"not_an_object\"}");
+    SIM_TEST_ASSERT(!c_t3.has_value(), "Must reject string for object field 'instrument'");
+    auto [c_t4, err_t4] = SimulationConfig::from_json_strict("{\"risk\": {\"allow_self_trade\": \"true\"}}");
+    SIM_TEST_ASSERT(!c_t4.has_value(), "Must reject string for boolean field 'allow_self_trade'");
+    auto [c_t5, err_t5] = SimulationConfig::from_json_strict("{\"risk\": {\"allow_self_trade\": 1}}");
+    SIM_TEST_ASSERT(!c_t5.has_value(), "Must reject number for boolean field 'allow_self_trade'");
+    auto [c_t6, err_t6] = SimulationConfig::from_json_strict("{\"strategy_account_id\": 12345}");
+    SIM_TEST_ASSERT(!c_t6.has_value(), "Must reject number for string field 'strategy_account_id'");
+
+    // 7. Unknown configuration keys
+    auto [c_u1, err_u1] = SimulationConfig::from_json_strict("{\"unknown_top_level\": 123}");
+    SIM_TEST_ASSERT(!c_u1.has_value(), "Must reject unknown top-level configuration key");
+    auto [c_u2, err_u2] = SimulationConfig::from_json_strict("{\"instrument\": {\"unknown_instrument_key\": 1}}");
+    SIM_TEST_ASSERT(!c_u2.has_value(), "Must reject unknown nested key in instrument");
+    auto [c_u3, err_u3] = SimulationConfig::from_json_strict("{\"risk\": {\"bogus_risk_param\": 1}}");
+    SIM_TEST_ASSERT(!c_u3.has_value(), "Must reject unknown nested key in risk");
+
+    // 8. Omitted optional fields vs explicitly invalid values
+    // Empty object is valid; all optional fields take defaults
+    auto [c_empty, err_empty] = SimulationConfig::from_json_strict("{}");
+    SIM_TEST_ASSERT(c_empty.has_value(), "Omitted optional fields must take defaults");
+    SIM_TEST_ASSERT(c_empty->seed == 42, "Default seed should be applied when omitted");
+    SIM_TEST_ASSERT(c_empty->instrument.symbol == "BTC-USDT", "Default instrument symbol should apply");
+
+    // Explicitly provided field with invalid value must be rejected (not fall back to default)
+    auto [c_inv_tick, err_inv_tick] = SimulationConfig::from_json_strict("{\"instrument\": {\"tick_size\": 0}}");
+    SIM_TEST_ASSERT(!c_inv_tick.has_value(), "Explicit zero tick_size must be rejected, not defaulted");
+    auto [c_inv_fee, err_inv_fee] = SimulationConfig::from_json_strict("{\"fees\": {\"maker_fee_bps\": -5}}");
+    SIM_TEST_ASSERT(!c_inv_fee.has_value(), "Explicit negative fee must be rejected, not defaulted");
+
+    // 9. Semantic validation: Identical strategy and background account IDs
     std::string bad_json_accounts = "{\"strategy_account_id\": \"SAME\", \"background_account_id\": \"SAME\"}";
     auto [c4, err4] = SimulationConfig::from_json_strict(bad_json_accounts);
     SIM_TEST_ASSERT(!c4.has_value(), "Must reject identical account IDs");
 
-    // 5. Valid config must pass
+    // 10. Valid complete config must pass
     SimulationConfig valid_cfg;
     auto val_res = valid_cfg.validate();
     SIM_TEST_ASSERT(val_res.valid, "Default config must be valid");

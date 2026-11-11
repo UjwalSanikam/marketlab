@@ -256,6 +256,115 @@ bool test_file_hash_parity_and_lf_bytes() {
     return true;
 }
 
+bool test_cli_config_validation() {
+    std::cout << "[RUN] test_cli_config_validation...\n";
+
+    // Locate CLI binary
+    std::vector<std::string> bin_candidates = {
+        "marketlab.exe",
+        "./marketlab.exe",
+        ".\\marketlab.exe",
+        "build/marketlab.exe",
+        "./build/marketlab.exe",
+        ".\\build\\marketlab.exe",
+        "../build/marketlab.exe"
+    };
+    std::string exe;
+    for (const auto& c : bin_candidates) {
+        std::ifstream f(c);
+        if (f.good()) {
+            exe = c;
+            break;
+        }
+    }
+    REG_ASSERT(!exe.empty(), "Cannot find marketlab.exe executable");
+
+    auto normalize_path = [](std::string p) -> std::string {
+#ifdef _WIN32
+        for (char& c : p) {
+            if (c == '/') c = '\\';
+        }
+#endif
+        return p;
+    };
+
+    exe = normalize_path(exe);
+
+    auto run_cli = [&](std::string cfg_file) -> int {
+        cfg_file = normalize_path(cfg_file);
+        std::string cmd = exe + " sim --config " + cfg_file + " > NUL 2>&1";
+        return std::system(cmd.c_str());
+    };
+
+    // 1. Reproduction: Non-JSON config must return non-zero exit code
+    std::string invalid_cfg = "scratch/review/invalid-config.json";
+    if (!std::ifstream(invalid_cfg).good()) {
+        invalid_cfg = "../scratch/review/invalid-config.json";
+    }
+    REG_ASSERT(std::ifstream(invalid_cfg).good(), "Cannot find invalid-config.json");
+    int rc_invalid = run_cli(invalid_cfg);
+    REG_ASSERT(rc_invalid != 0, "sim with invalid-config.json must exit with non-zero code");
+
+    // Helper to write temporary config and test CLI exit code
+    auto test_temp_cfg = [&](const std::string& name, const std::string& content, bool expect_success) -> bool {
+        {
+            std::ofstream ofs(name, std::ios::binary);
+            ofs << content;
+        }
+        int rc = run_cli(name);
+        std::remove(name.c_str());
+        if (expect_success) {
+            return rc == 0;
+        } else {
+            return rc != 0;
+        }
+    };
+
+    // 2. CLI rejects malformed JSON
+    REG_ASSERT(test_temp_cfg("test_cli_malformed.json", "{ not_json: 123 }", false),
+               "CLI must reject malformed JSON");
+
+    // 3. CLI rejects non-object root
+    REG_ASSERT(test_temp_cfg("test_cli_array.json", "[1, 2, 3]", false),
+               "CLI must reject array root");
+
+    // 4. CLI rejects trailing garbage
+    REG_ASSERT(test_temp_cfg("test_cli_trailing.json", "{\"seed\": 42} trailing", false),
+               "CLI must reject trailing garbage");
+
+    // 5. CLI rejects duplicate keys
+    REG_ASSERT(test_temp_cfg("test_cli_dup.json", "{\"seed\": 42, \"seed\": 43}", false),
+               "CLI must reject duplicate keys");
+
+    // 6. CLI rejects incorrect field types
+    REG_ASSERT(test_temp_cfg("test_cli_wrong_type.json", "{\"seed\": \"bad\"}", false),
+               "CLI must reject incorrect field types");
+
+    // 7. CLI rejects unknown configuration keys
+    REG_ASSERT(test_temp_cfg("test_cli_unknown.json", "{\"unknown_cli_key\": 123}", false),
+               "CLI must reject unknown configuration keys");
+
+    // 8. CLI rejects explicitly invalid values
+    REG_ASSERT(test_temp_cfg("test_cli_invalid_val.json", "{\"instrument\": {\"tick_size\": 0}}", false),
+               "CLI must reject invalid tick size");
+
+    // 9. CLI accepts valid config with omitted optional fields (defaults applied)
+    REG_ASSERT(test_temp_cfg("test_cli_empty.json", "{}", true),
+               "CLI must accept empty object and apply defaults");
+
+    // 10. CLI accepts complete valid config
+    std::string valid_cfg = "data/demo_session.json";
+    if (!std::ifstream(valid_cfg).good()) {
+        valid_cfg = "../data/demo_session.json";
+    }
+    REG_ASSERT(std::ifstream(valid_cfg).good(), "Cannot find demo_session.json");
+    int rc_valid = run_cli(valid_cfg);
+    REG_ASSERT(rc_valid == 0, "CLI must accept valid demo_session.json with exit code 0");
+
+    std::cout << "[PASS] test_cli_config_validation\n";
+    return true;
+}
+
 int main() {
     std::cout << "Running MarketLab Hardening Regression Suite...\n\n";
     bool all_ok = true;
@@ -263,6 +372,7 @@ int main() {
     all_ok &= test_malformed_input_hardening();
     all_ok &= test_boundary_quantities();
     all_ok &= test_file_hash_parity_and_lf_bytes();
+    all_ok &= test_cli_config_validation();
 
     if (all_ok) {
         std::cout << "\nALL HARDENING REGRESSION TESTS PASSED SUCCESSFULLY!\n";

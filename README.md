@@ -281,8 +281,56 @@ All digests match the printed simulation output byte-for-byte.
 
 ---
 
-## 6. Simulation Configuration Format (`data/demo_session.json`)
+## 6. Simulation Configuration Schema & Validation Rules
 
+Simulation sessions are configured via a strictly validated JSON document (e.g., `data/demo_session.json`).
+
+### 1. Document Structure & Default Values
+All fields in the configuration are optional. When omitted, standard defaults are applied. When present, values must strictly adhere to the documented types and constraints:
+
+| Scope | Field Key | Type | Default Value | Constraints / Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **Root** | `seed` | `uint64` | `42` | RNG seed for synthetic market flow generation. |
+| | `run_horizon_ns` | `uint64` | `10,000,000,000` (10s) | Simulation duration horizon in nanoseconds (must be > 0). |
+| | `max_events` | `uint64` | `500,000` | Safety ceiling on processed scheduler events (must be > 0). |
+| | `strategy_account_id` | `string` | `"MM"` | Strategy participant account identifier. |
+| | `strategy_starting_cash` | `int64` | `1,000,000` | Initial capital credited to strategy ledger. |
+| | `strategy_starting_inventory` | `int64` | `100` | Initial position lots credited to strategy ledger (>= 0). |
+| | `background_account_id` | `string` | `"BACKGROUND"` | External counterparty account identifier. |
+| | `background_starting_cash` | `int64` | `10,000,000` | Initial capital credited to background ledger. |
+| | `background_starting_inventory` | `int64` | `10,000` | Initial position lots credited to background ledger (>= 0). |
+| **`instrument`** | `symbol` | `string` | `"BTC-USDT"` | Symbol identifier. |
+| | `tick_size` | `int64` | `1` | Minimum price increment (must be > 0). |
+| | `lot_size` | `int64` | `1` | Minimum quantity increment (must be > 0). |
+| **`fees`** | `maker_fee_bps` | `int64` | `0` | Maker fee in basis points (1 bps = 0.01%, must be >= 0). |
+| | `taker_fee_bps` | `int64` | `0` | Taker fee in basis points (must be >= 0). |
+| | `fee_account_id` | `string` | `"FEE_ACCOUNT"` | Exchange account accumulating trading fee deductions. |
+| **`latencies`** | `market_data_delay_ns` | `uint64` | `0` | Delay from market event generation to strategy delivery. |
+| | `strategy_delay_ns` | `uint64` | `0` | Simulated strategy computation latency. |
+| | `order_entry_delay_ns` | `uint64` | `0` | Network latency from order submission to exchange gateway. |
+| | `execution_report_delay_ns`| `uint64` | `0` | Network latency for fill / cancel reports back to strategy. |
+| **`risk`** | `max_order_qty` | `int64` | `1,000,000` | Hard limit on quantity per order (must be > 0). |
+| | `max_order_notional` | `int64` | `1,000,000,000` | Hard cap on notional value per order (must be > 0). |
+| | `max_inventory` | `int64` | `5,000,000` | Cap on net inventory exposure (must be > 0). |
+| | `max_data_age_ns` | `uint64` | `10,000,000,000` (10s)| Maximum market data age before gating new orders. |
+| | `allow_self_trade` | `bool` | `false` | When false, checks full executable depth for self-trade. |
+| **`strategy`** | `quote_size` | `int64` | `5` | Lot size per quote order (quoting disabled if <= 0). |
+| | `half_spread` | `int64` | `2` | Half-spread offset from calculated reservation price. |
+| | `inventory_target` | `int64` | `0` | Target inventory level for reservation price skew. |
+| | `skew_per_lot` | `int64` | `1` | Reservation price shift in ticks per unit inventory deviation. |
+| | `quote_interval_ns` | `uint64` | `1,000,000,000` (1s) | Minimum interval between quote updates. |
+
+### 2. Strict Validation & Error Handling Rules
+Configuration parsing is enforced by an internal RFC 8259-compliant JSON parser (`JsonParser` in `include/marketlab/json.hpp`):
+- **Object Root Required**: Root element must be a JSON object (`{...}`). Arrays, strings, numbers, booleans, or null at the root are rejected immediately.
+- **Malformed Syntax**: Unterminated strings, invalid literals, unquoted identifiers, or trailing commas fail with line and column diagnostics.
+- **No Trailing Garbage**: Extraneous tokens after the closing brace of the root object are rejected.
+- **Duplicate Keys Prohibited**: Any duplicate key inside an object produces an immediate parse error.
+- **Strict Typing**: Fields must strictly match their expected JSON types (e.g., boolean fields cannot accept strings or numbers; integer fields cannot accept floating-point numbers or strings).
+- **No Unknown Keys**: Any unknown key at the root or within nested objects (`instrument`, `fees`, `latencies`, `risk`, `strategy`) is rejected with a descriptive error naming the offending path.
+- **Omitted vs. Invalid Distinction**: Defaults apply exclusively to omitted optional fields. An explicitly supplied invalid value (e.g. `tick_size = 0`, `maker_fee_bps = -5`, or `strategy_account_id == background_account_id`) is strictly rejected before the simulation starts and returns a non-zero exit code.
+
+### 3. Example Configuration File (`data/demo_session.json`)
 ```json
 {
   "seed": 42,

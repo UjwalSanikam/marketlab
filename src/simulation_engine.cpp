@@ -1,9 +1,10 @@
 #include "marketlab/simulation_engine.hpp"
 #include "marketlab/serializer.hpp"
+#include "marketlab/json.hpp"
 #include <sstream>
 #include <iomanip>
 #include <random>
-#include <regex>
+#include <unordered_set>
 
 namespace marketlab {
 
@@ -116,160 +117,337 @@ std::string SimulationConfig::to_json() const {
 }
 
 std::pair<std::optional<SimulationConfig>, std::string> SimulationConfig::from_json_strict(const std::string& json_str) {
+    auto parse_res = JsonParser::parse(json_str);
+    if (!parse_res.ok) {
+        return {std::nullopt, "JSON parse error: " + parse_res.error};
+    }
+
+    if (!parse_res.value.is_object()) {
+        return {std::nullopt, "JSON root must be an object, got " + parse_res.value.type_name()};
+    }
+
     SimulationConfig cfg;
-    auto get_str = [&](const std::string& key) -> std::optional<std::string> {
-        std::string pattern = "\"" + key + "\"\\s*:\\s*(\"[^\"]*\"|[-+]?[0-9a-zA-Z_.]+)?";
-        std::regex re(pattern);
-        std::smatch match;
-        if (std::regex_search(json_str, match, re) && match.size() > 1 && match[1].matched) {
-            std::string val = match[1].str();
-            if (val.size() >= 2 && val.front() == '"' && val.back() == '"') {
-                return val.substr(1, val.size() - 2);
-            }
-            return val;
-        }
-        return std::nullopt;
+
+    const std::unordered_set<std::string> allowed_root_keys = {
+        "seed",
+        "run_horizon_ns",
+        "max_events",
+        "instrument",
+        "fees",
+        "latencies",
+        "risk",
+        "strategy",
+        "strategy_account_id",
+        "strategy_starting_cash",
+        "strategy_starting_inventory",
+        "background_account_id",
+        "background_starting_cash",
+        "background_starting_inventory"
     };
 
-    if (auto v = get_str("seed")) {
-        auto i = Serializer::parse_strict_integer<uint64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'seed': " + *v};
+    // 1. Check for unknown root keys
+    for (const auto& [k, v] : parse_res.value.as_object()) {
+        if (allowed_root_keys.find(k) == allowed_root_keys.end()) {
+            return {std::nullopt, "Unknown configuration key: '" + k + "'"};
+        }
+    }
+
+    // 2. Validate and extract top-level fields
+    if (const auto* val = parse_res.value.find("seed")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'seed' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_uint64();
+        if (!i) return {std::nullopt, "Field 'seed' out of valid range for uint64: " + val->raw_number()};
         cfg.seed = *i;
     }
-    if (auto v = get_str("run_horizon_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'run_horizon_ns': " + *v};
+
+    if (const auto* val = parse_res.value.find("run_horizon_ns")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'run_horizon_ns' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_uint64();
+        if (!i) return {std::nullopt, "Field 'run_horizon_ns' out of valid range for uint64: " + val->raw_number()};
         cfg.run_horizon_ns = *i;
     }
-    if (auto v = get_str("max_events")) {
-        auto i = Serializer::parse_strict_integer<size_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'max_events': " + *v};
-        cfg.max_events = *i;
+
+    if (const auto* val = parse_res.value.find("max_events")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'max_events' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_uint64();
+        if (!i) return {std::nullopt, "Field 'max_events' out of valid range for uint64: " + val->raw_number()};
+        cfg.max_events = static_cast<size_t>(*i);
     }
 
-    if (auto v = get_str("symbol")) cfg.instrument.symbol = *v;
-    if (auto v = get_str("tick_size")) {
-        auto i = Serializer::parse_strict_integer<Price>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'tick_size': " + *v};
-        cfg.instrument.tick_size = *i;
-    }
-    if (auto v = get_str("lot_size")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'lot_size': " + *v};
-        cfg.instrument.lot_size = *i;
-    }
-
-    if (auto v = get_str("maker_fee_bps")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'maker_fee_bps': " + *v};
-        cfg.fees.maker_fee_bps = *i;
-    }
-    if (auto v = get_str("taker_fee_bps")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'taker_fee_bps': " + *v};
-        cfg.fees.taker_fee_bps = *i;
-    }
-    if (auto v = get_str("fee_account_id")) cfg.fees.fee_account_id = *v;
-
-    if (auto v = get_str("market_data_delay_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'market_data_delay_ns': " + *v};
-        cfg.latencies.market_data_delay = *i;
-    }
-    if (auto v = get_str("strategy_delay_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_delay_ns': " + *v};
-        cfg.latencies.strategy_delay = *i;
-    }
-    if (auto v = get_str("order_entry_delay_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'order_entry_delay_ns': " + *v};
-        cfg.latencies.order_entry_delay = *i;
-    }
-    if (auto v = get_str("execution_report_delay_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'execution_report_delay_ns': " + *v};
-        cfg.latencies.execution_report_delay = *i;
+    // 3. Instrument object
+    if (const auto* inst_val = parse_res.value.find("instrument")) {
+        if (!inst_val->is_object()) {
+            return {std::nullopt, "Field 'instrument' must be an object, got " + inst_val->type_name()};
+        }
+        const std::unordered_set<std::string> allowed_inst_keys = {"symbol", "tick_size", "lot_size"};
+        for (const auto& [k, v] : inst_val->as_object()) {
+            if (allowed_inst_keys.find(k) == allowed_inst_keys.end()) {
+                return {std::nullopt, "Unknown configuration key: 'instrument." + k + "'"};
+            }
+        }
+        if (const auto* v = inst_val->find("symbol")) {
+            if (!v->is_string()) return {std::nullopt, "Field 'instrument.symbol' must be a string, got " + v->type_name()};
+            cfg.instrument.symbol = v->as_string();
+        }
+        if (const auto* v = inst_val->find("tick_size")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'instrument.tick_size' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'instrument.tick_size' out of range for int64: " + v->raw_number()};
+            cfg.instrument.tick_size = *i;
+        }
+        if (const auto* v = inst_val->find("lot_size")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'instrument.lot_size' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'instrument.lot_size' out of range for int64: " + v->raw_number()};
+            cfg.instrument.lot_size = *i;
+        }
     }
 
-    if (auto v = get_str("max_order_qty")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'max_order_qty': " + *v};
-        cfg.risk.max_order_qty = *i;
-    }
-    if (auto v = get_str("max_order_notional")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'max_order_notional': " + *v};
-        cfg.risk.max_order_notional = *i;
-    }
-    if (auto v = get_str("max_inventory")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'max_inventory': " + *v};
-        cfg.risk.max_inventory = *i;
-    }
-    if (auto v = get_str("max_data_age_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'max_data_age_ns': " + *v};
-        cfg.risk.max_data_age_ns = *i;
-    }
-    if (auto v = get_str("allow_self_trade")) {
-        if (*v != "true" && *v != "false") return {std::nullopt, "Invalid boolean for 'allow_self_trade': " + *v};
-        cfg.risk.allow_self_trade = (*v == "true");
-    }
-
-    if (auto v = get_str("quote_size")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'quote_size': " + *v};
-        cfg.strategy_config.quote_size = *i;
-    }
-    if (auto v = get_str("half_spread")) {
-        auto i = Serializer::parse_strict_integer<Price>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'half_spread': " + *v};
-        cfg.strategy_config.half_spread = *i;
-    }
-    if (auto v = get_str("inventory_target")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'inventory_target': " + *v};
-        cfg.strategy_config.inventory_target = *i;
-    }
-    if (auto v = get_str("skew_per_lot")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'skew_per_lot': " + *v};
-        cfg.strategy_config.skew_per_lot = *i;
-    }
-    if (auto v = get_str("quote_interval_ns")) {
-        auto i = Serializer::parse_strict_integer<SimTime>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'quote_interval_ns': " + *v};
-        cfg.strategy_config.quote_interval_ns = *i;
+    // 4. Fees object
+    if (const auto* fees_val = parse_res.value.find("fees")) {
+        if (!fees_val->is_object()) {
+            return {std::nullopt, "Field 'fees' must be an object, got " + fees_val->type_name()};
+        }
+        const std::unordered_set<std::string> allowed_fees_keys = {"maker_fee_bps", "taker_fee_bps", "fee_account_id"};
+        for (const auto& [k, v] : fees_val->as_object()) {
+            if (allowed_fees_keys.find(k) == allowed_fees_keys.end()) {
+                return {std::nullopt, "Unknown configuration key: 'fees." + k + "'"};
+            }
+        }
+        if (const auto* v = fees_val->find("maker_fee_bps")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'fees.maker_fee_bps' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'fees.maker_fee_bps' out of range for int64: " + v->raw_number()};
+            cfg.fees.maker_fee_bps = *i;
+        }
+        if (const auto* v = fees_val->find("taker_fee_bps")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'fees.taker_fee_bps' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'fees.taker_fee_bps' out of range for int64: " + v->raw_number()};
+            cfg.fees.taker_fee_bps = *i;
+        }
+        if (const auto* v = fees_val->find("fee_account_id")) {
+            if (!v->is_string()) return {std::nullopt, "Field 'fees.fee_account_id' must be a string, got " + v->type_name()};
+            cfg.fees.fee_account_id = v->as_string();
+        }
     }
 
-    if (auto v = get_str("strategy_account_id")) cfg.strategy_account_id = *v;
-    if (auto v = get_str("strategy_starting_cash")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_starting_cash': " + *v};
+    // 5. Latencies object
+    if (const auto* lat_val = parse_res.value.find("latencies")) {
+        if (!lat_val->is_object()) {
+            return {std::nullopt, "Field 'latencies' must be an object, got " + lat_val->type_name()};
+        }
+        const std::unordered_set<std::string> allowed_lat_keys = {
+            "market_data_delay_ns", "strategy_delay_ns", "order_entry_delay_ns", "execution_report_delay_ns"
+        };
+        for (const auto& [k, v] : lat_val->as_object()) {
+            if (allowed_lat_keys.find(k) == allowed_lat_keys.end()) {
+                return {std::nullopt, "Unknown configuration key: 'latencies." + k + "'"};
+            }
+        }
+        if (const auto* v = lat_val->find("market_data_delay_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'latencies.market_data_delay_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'latencies.market_data_delay_ns' out of range for uint64: " + v->raw_number()};
+            cfg.latencies.market_data_delay = *i;
+        }
+        if (const auto* v = lat_val->find("strategy_delay_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'latencies.strategy_delay_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'latencies.strategy_delay_ns' out of range for uint64: " + v->raw_number()};
+            cfg.latencies.strategy_delay = *i;
+        }
+        if (const auto* v = lat_val->find("order_entry_delay_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'latencies.order_entry_delay_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'latencies.order_entry_delay_ns' out of range for uint64: " + v->raw_number()};
+            cfg.latencies.order_entry_delay = *i;
+        }
+        if (const auto* v = lat_val->find("execution_report_delay_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'latencies.execution_report_delay_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'latencies.execution_report_delay_ns' out of range for uint64: " + v->raw_number()};
+            cfg.latencies.execution_report_delay = *i;
+        }
+    }
+
+    // 6. Risk object
+    if (const auto* risk_val = parse_res.value.find("risk")) {
+        if (!risk_val->is_object()) {
+            return {std::nullopt, "Field 'risk' must be an object, got " + risk_val->type_name()};
+        }
+        const std::unordered_set<std::string> allowed_risk_keys = {
+            "max_order_qty", "max_order_notional", "max_inventory", "max_data_age_ns", "allow_self_trade"
+        };
+        for (const auto& [k, v] : risk_val->as_object()) {
+            if (allowed_risk_keys.find(k) == allowed_risk_keys.end()) {
+                return {std::nullopt, "Unknown configuration key: 'risk." + k + "'"};
+            }
+        }
+        if (const auto* v = risk_val->find("max_order_qty")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'risk.max_order_qty' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'risk.max_order_qty' out of range for int64: " + v->raw_number()};
+            cfg.risk.max_order_qty = *i;
+        }
+        if (const auto* v = risk_val->find("max_order_notional")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'risk.max_order_notional' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'risk.max_order_notional' out of range for int64: " + v->raw_number()};
+            cfg.risk.max_order_notional = *i;
+        }
+        if (const auto* v = risk_val->find("max_inventory")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'risk.max_inventory' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'risk.max_inventory' out of range for int64: " + v->raw_number()};
+            cfg.risk.max_inventory = *i;
+        }
+        if (const auto* v = risk_val->find("max_data_age_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'risk.max_data_age_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'risk.max_data_age_ns' out of range for uint64: " + v->raw_number()};
+            cfg.risk.max_data_age_ns = *i;
+        }
+        if (const auto* v = risk_val->find("allow_self_trade")) {
+            if (!v->is_bool()) {
+                return {std::nullopt, "Field 'risk.allow_self_trade' must be a boolean, got " + v->type_name()};
+            }
+            cfg.risk.allow_self_trade = v->as_bool();
+        }
+    }
+
+    // 7. Strategy object
+    if (const auto* strat_val = parse_res.value.find("strategy")) {
+        if (!strat_val->is_object()) {
+            return {std::nullopt, "Field 'strategy' must be an object, got " + strat_val->type_name()};
+        }
+        const std::unordered_set<std::string> allowed_strat_keys = {
+            "quote_size", "half_spread", "inventory_target", "skew_per_lot", "quote_interval_ns"
+        };
+        for (const auto& [k, v] : strat_val->as_object()) {
+            if (allowed_strat_keys.find(k) == allowed_strat_keys.end()) {
+                return {std::nullopt, "Unknown configuration key: 'strategy." + k + "'"};
+            }
+        }
+        if (const auto* v = strat_val->find("quote_size")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'strategy.quote_size' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'strategy.quote_size' out of range for int64: " + v->raw_number()};
+            cfg.strategy_config.quote_size = *i;
+        }
+        if (const auto* v = strat_val->find("half_spread")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'strategy.half_spread' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'strategy.half_spread' out of range for int64: " + v->raw_number()};
+            cfg.strategy_config.half_spread = *i;
+        }
+        if (const auto* v = strat_val->find("inventory_target")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'strategy.inventory_target' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'strategy.inventory_target' out of range for int64: " + v->raw_number()};
+            cfg.strategy_config.inventory_target = *i;
+        }
+        if (const auto* v = strat_val->find("skew_per_lot")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'strategy.skew_per_lot' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_int64();
+            if (!i) return {std::nullopt, "Field 'strategy.skew_per_lot' out of range for int64: " + v->raw_number()};
+            cfg.strategy_config.skew_per_lot = *i;
+        }
+        if (const auto* v = strat_val->find("quote_interval_ns")) {
+            if (!v->is_number() || v->is_floating_point()) {
+                return {std::nullopt, "Field 'strategy.quote_interval_ns' must be an integer, got " + v->type_name()};
+            }
+            auto i = v->as_uint64();
+            if (!i) return {std::nullopt, "Field 'strategy.quote_interval_ns' out of range for uint64: " + v->raw_number()};
+            cfg.strategy_config.quote_interval_ns = *i;
+        }
+    }
+
+    // 8. Strategy & Background accounts
+    if (const auto* val = parse_res.value.find("strategy_account_id")) {
+        if (!val->is_string()) return {std::nullopt, "Field 'strategy_account_id' must be a string, got " + val->type_name()};
+        cfg.strategy_account_id = val->as_string();
+    }
+    if (const auto* val = parse_res.value.find("strategy_starting_cash")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'strategy_starting_cash' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_int64();
+        if (!i) return {std::nullopt, "Field 'strategy_starting_cash' out of range for int64: " + val->raw_number()};
         cfg.strategy_starting_cash = *i;
     }
-    if (auto v = get_str("strategy_starting_inventory")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_starting_inventory': " + *v};
+    if (const auto* val = parse_res.value.find("strategy_starting_inventory")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'strategy_starting_inventory' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_int64();
+        if (!i) return {std::nullopt, "Field 'strategy_starting_inventory' out of range for int64: " + val->raw_number()};
         cfg.strategy_starting_inventory = *i;
     }
 
-    if (auto v = get_str("background_account_id")) cfg.background_account_id = *v;
-    if (auto v = get_str("background_starting_cash")) {
-        auto i = Serializer::parse_strict_integer<int64_t>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'background_starting_cash': " + *v};
+    if (const auto* val = parse_res.value.find("background_account_id")) {
+        if (!val->is_string()) return {std::nullopt, "Field 'background_account_id' must be a string, got " + val->type_name()};
+        cfg.background_account_id = val->as_string();
+    }
+    if (const auto* val = parse_res.value.find("background_starting_cash")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'background_starting_cash' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_int64();
+        if (!i) return {std::nullopt, "Field 'background_starting_cash' out of range for int64: " + val->raw_number()};
         cfg.background_starting_cash = *i;
     }
-    if (auto v = get_str("background_starting_inventory")) {
-        auto i = Serializer::parse_strict_integer<Quantity>(*v);
-        if (!i) return {std::nullopt, "Invalid numeric format for 'background_starting_inventory': " + *v};
+    if (const auto* val = parse_res.value.find("background_starting_inventory")) {
+        if (!val->is_number() || val->is_floating_point()) {
+            return {std::nullopt, "Field 'background_starting_inventory' must be an integer, got " + val->type_name()};
+        }
+        auto i = val->as_int64();
+        if (!i) return {std::nullopt, "Field 'background_starting_inventory' out of range for int64: " + val->raw_number()};
         cfg.background_starting_inventory = *i;
     }
 
+    // 9. Semantic validation
     auto val_res = cfg.validate();
     if (!val_res.valid) {
-        return {std::nullopt, "Validation error: " + val_res.error};
+        return {std::nullopt, "Configuration semantic error: " + val_res.error};
     }
 
     return {cfg, ""};
