@@ -80,22 +80,34 @@ struct FeeConfig {
     int64_t taker_fee_bps{0}; // Basis points
     AccountId fee_account_id{"FEE_ACCOUNT"};
 
+    [[nodiscard]] int64_t max_fee_bps() const noexcept {
+        return std::max(maker_fee_bps, taker_fee_bps);
+    }
+
     // Calculate fee for a given trade notional: floor(notional * bps / 10000)
     [[nodiscard]] int64_t calculate_maker_fee(int64_t notional) const noexcept {
         if (maker_fee_bps <= 0 || notional <= 0) return 0;
-        return (notional * maker_fee_bps) / 10000;
+        __int128_t prod = static_cast<__int128_t>(notional) * maker_fee_bps;
+        return static_cast<int64_t>(prod / 10000);
     }
 
     [[nodiscard]] int64_t calculate_taker_fee(int64_t notional) const noexcept {
         if (taker_fee_bps <= 0 || notional <= 0) return 0;
-        return (notional * taker_fee_bps) / 10000;
+        __int128_t prod = static_cast<__int128_t>(notional) * taker_fee_bps;
+        return static_cast<int64_t>(prod / 10000);
     }
 
-    // Conservative fee reservation for order admission
+    // Conservative fee reservation for order admission reserving for the maximum applicable maker/taker fee
+    [[nodiscard]] int64_t conservative_fee_reservation(int64_t max_notional) const noexcept {
+        int64_t rate = max_fee_bps();
+        if (rate <= 0 || max_notional <= 0) return 0;
+        // Conservative: add 9999 for rounding up to ensure full reservation
+        __int128_t prod = static_cast<__int128_t>(max_notional) * rate + 9999;
+        return static_cast<int64_t>(prod / 10000);
+    }
+
     [[nodiscard]] int64_t conservative_taker_fee_reservation(int64_t max_notional) const noexcept {
-        if (taker_fee_bps <= 0 || max_notional <= 0) return 0;
-        // Conservative: add 1 unit for rounding up to ensure full reservation
-        return ((max_notional * taker_fee_bps) + 9999) / 10000;
+        return conservative_fee_reservation(max_notional);
     }
 };
 

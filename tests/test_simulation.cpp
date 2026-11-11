@@ -266,13 +266,13 @@ bool test_hand_calculated_pnl() {
 
     const auto* pos = ledger.get_account("TRADER");
     SIM_TEST_ASSERT(pos->inventory == 10, "Inventory 10");
-    SIM_TEST_ASSERT(std::abs(pos->avg_cost_basis - 100.0) < 1e-6, "Cost basis 100");
+    SIM_TEST_ASSERT(pos->cost_basis_per_lot() == 100, "Cost basis 100");
 
     // Trade 2: Buy 10 lots @ 200. Total 20 lots. Total cost = 1000 + 2000 = 3000. Avg cost = 150.
     TradeSettlement t2{2, 2000, 3, 4, "TRADER", "COUNTERPARTY", Side::Buy, 200, 10, 2000, 0, 0};
     ledger.settle_trade(t2);
     SIM_TEST_ASSERT(pos->inventory == 20, "Inventory 20");
-    SIM_TEST_ASSERT(std::abs(pos->avg_cost_basis - 150.0) < 1e-6, "Avg cost basis 150");
+    SIM_TEST_ASSERT(pos->cost_basis_per_lot() == 150, "Avg cost basis 150");
 
     // Trade 3: Sell 5 lots @ 250.
     // Realized PnL on 5 lots = (250 - 150) * 5 = +500.
@@ -280,7 +280,7 @@ bool test_hand_calculated_pnl() {
     ledger.settle_trade(t3);
     SIM_TEST_ASSERT(pos->inventory == 15, "Inventory 15");
     SIM_TEST_ASSERT(pos->realized_pnl == 500, "Realized PnL must be exactly +500");
-    SIM_TEST_ASSERT(std::abs(pos->avg_cost_basis - 150.0) < 1e-6, "Cost basis remains 150");
+    SIM_TEST_ASSERT(pos->cost_basis_per_lot() == 150, "Cost basis remains 150");
 
     // Unrealized PnL check at mark price 180:
     // 15 lots * (180 - 150) = +450.
@@ -418,6 +418,278 @@ bool test_synthetic_scenario_execution() {
     return true;
 }
 
+// REGRESSION 1: Pending buy quantities must be included in projected inventory limit
+bool regression_pending_buy_inventory_cap() {
+    std::cout << "[RUN] regression_pending_buy_inventory_cap...\n";
+    FeeConfig fees;
+    Ledger ledger(fees);
+    RiskEngine risk(RiskLimits{100, 1000000, 100, 10000000000ULL, false}); // max_inventory = 100
+    OrderBook book;
+
+    ledger.fund_account("TRADER", 50000, 80); // Settled inventory = 80
+
+    // Order 1: Buy 15 lots @ 100. (80 + 15 = 95 <= 100). Approved!
+    NewOrderCommand cmd1{1, 1001, Side::Buy, OrderType::Limit, 100, 15, TimeInForce::GTC};
+    auto res1 = risk.evaluate_and_reserve("TRADER", cmd1, 100, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(res1.approved, "Order 1 should be approved");
+
+    // Order 2: Buy 15 lots @ 100.
+    // Outstanding buy is 15. Total projected = 80 + 15 + 15 = 110 > 100!
+    // Must be rejected!
+    NewOrderCommand cmd2{2, 1002, Side::Buy, OrderType::Limit, 100, 15, TimeInForce::GTC};
+    auto res2 = risk.evaluate_and_reserve("TRADER", cmd2, 100, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(!res2.approved, "Order 2 must be rejected for exceeding max inventory including pending buys");
+    SIM_TEST_ASSERT(res2.reject_reason == RiskRejectReason::MaxInventoryExceeded, "Reject reason must be MaxInventoryExceeded");
+
+    // Cancel Order 1 -> releases pending buy quantity
+    ledger.release_reservation_on_cancel(1001, 15);
+
+    // Order 3: Buy 15 lots @ 100. Now pending is 0, so 80 + 15 = 95 <= 100. Approved!
+    NewOrderCommand cmd3{3, 1003, Side::Buy, OrderType::Limit, 100, 15, TimeInForce::GTC};
+    auto res3 = risk.evaluate_and_reserve("TRADER", cmd3, 100, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(res3.approved, "Order 3 should be approved after cancellation of Order 1");
+
+    std::cout << "[PASS] regression_pending_buy_inventory_cap\n";
+    return true;
+}
+
+// REGRESSION 2: Self-trade prevention must inspect entire executable matching path
+bool regression_self_trade_prevention_deep_book() {
+    std::cout << "[RUN] regression_self_trade_prevention_deep_book...\n";
+    RiskEngine risk(RiskLimits{100, 1000000, 1000, 10000000000ULL, false}); // STP enabled
+    FeeConfig fees;
+    Ledger ledger(fees);
+    OrderBook book;
+
+    ledger.fund_account("ALICE", 50000, 50);
+    ledger.fund_account("BOB", 50000, 50);
+
+    std::vector<Event> events;
+    // Level 1: Ask @ 100, qty 5 (BOB)
+    NewOrderCommand bob_ask{1, 101, Side::Sell, OrderType::Limit, 100, 5, TimeInForce::GTC};
+    auto res_b = risk.evaluate_and_reserve("BOB", bob_ask, 100, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(res_b.approved, "Bob ask approved");
+    book.process(bob_ask, events);
+
+    // Level 2: Ask @ 102, qty 10 (ALICE)
+    events.clear();
+    NewOrderCommand alice_ask{2, 102, Side::Sell, OrderType::Limit, 102, 10, TimeInForce::GTC};
+    auto res_a = risk.evaluate_and_reserve("ALICE", alice_ask, 102, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(res_a.approved, "Alice ask approved");
+    book.process(alice_ask, events);
+
+    // Now ALICE submits Buy 15 @ 102.
+    // It would match BOB (5 @ 100) and then match ALICE (10 @ 102).
+    // Buggy STP only checked top of book (BOB @ 100) and approved!
+    // Correct STP must check the entire executable path and REJECT!
+    NewOrderCommand alice_buy{3, 103, Side::Buy, OrderType::Limit, 102, 15, TimeInForce::IOC};
+    auto res = risk.evaluate_and_reserve("ALICE", alice_buy, 102, 1000, 1000, book, ledger);
+    SIM_TEST_ASSERT(!res.approved, "ALICE buy must be rejected for deep self-trade at Level 2");
+    SIM_TEST_ASSERT(res.reject_reason == RiskRejectReason::SelfTradeProhibited, "Must reject with SelfTradeProhibited");
+
+    std::cout << "[PASS] regression_self_trade_prevention_deep_book\n";
+    return true;
+}
+
+// REGRESSION 3: Market-buy protection cap enforced during execution (IOC semantics, cash never negative)
+bool regression_market_buy_protected_ioc_execution() {
+    std::cout << "[RUN] regression_market_buy_protected_ioc_execution...\n";
+    SimulationConfig cfg;
+    cfg.latencies = {}; // Zero latency
+    cfg.strategy_starting_cash = 1500;
+    cfg.strategy_starting_inventory = 0;
+    cfg.strategy_config.quote_size = 0; // Disable passive quoting so strategy only submits explicit orders
+    cfg.background_starting_cash = 100000;
+    cfg.background_starting_inventory = 1000;
+
+    SimulationEngine engine(cfg);
+
+    // Book liquidity:
+    // Level 1: 1 lot @ 100
+    // Level 2: 10 lots @ 500 (far above reasonable prices)
+    engine.submit_background_order("BACKGROUND", Side::Sell, OrderType::Limit, 100, 1, TimeInForce::GTC, 10);
+    engine.submit_background_order("BACKGROUND", Side::Sell, OrderType::Limit, 500, 10, TimeInForce::GTC, 20);
+
+    // Provide initial mark price observation at t=30: mark = 100
+    engine.emit_market_observation(30, 99, 101, 100, 100, 1);
+
+    // At t=50, Strategy submits market buy for 10 lots with explicit protection cap 110.
+    // If unprotected, it sweeps 1 lot @ 100 + 9 lots @ 500 = 4600 notional, which would make Alice's cash (1500) NEGATIVE!
+    // With protected IOC execution, it must fill 1 lot @ 100 and cancel the remaining 9 lots as IOC remainder!
+    engine.submit_background_order(cfg.strategy_account_id, Side::Buy, OrderType::Market, 110, 10, TimeInForce::IOC, 50);
+
+    auto summary = engine.run();
+    (void)summary;
+
+    const auto* pos = engine.ledger().get_account(cfg.strategy_account_id);
+    SIM_TEST_ASSERT(pos != nullptr, "Strategy account must exist");
+    SIM_TEST_ASSERT(pos->cash >= 0, "Cash must NEVER become negative!");
+    SIM_TEST_ASSERT(pos->inventory == 1, "Only 1 lot @ 100 should have filled under the 110 protection cap");
+    SIM_TEST_ASSERT(pos->reserved_cash == 0, "All remaining reservation must be released");
+    SIM_TEST_ASSERT(pos->available_cash() == pos->cash, "Available cash must match settled cash");
+
+    // Level 500 must still be resting on the book (untouched)
+    auto ask_snap = engine.book().get_snapshot().asks;
+    SIM_TEST_ASSERT(!ask_snap.empty() && ask_snap.front().price == 500, "Level 500 must be untouched by protected market buy");
+
+    std::cout << "[PASS] regression_market_buy_protected_ioc_execution\n";
+    return true;
+}
+
+// REGRESSION 4: Simulation causality & time arithmetic overflow
+bool regression_simulation_causality() {
+    std::cout << "[RUN] regression_simulation_causality...\n";
+    SimulationConfig cfg;
+    cfg.run_horizon_ns = 1000000000ULL; // 1 second
+    cfg.latencies.market_data_delay = 1000000; // 1ms
+
+    SimulationEngine engine(cfg);
+
+    // Schedule observation 1 at t=100ms with mark=100
+    engine.emit_market_observation(100000000ULL, 99, 101, 100, 100, 5);
+    // Schedule observation 2 at t=500ms with mark=250
+    engine.emit_market_observation(500000000ULL, 249, 251, 250, 250, 5);
+
+    // At t=0 before stepping: engine's authoritative last_market_data_time must be 0, NOT 500ms!
+    SIM_TEST_ASSERT(engine.last_market_data_time() == 0, "Future scheduled data cannot update runtime in the past!");
+    SIM_TEST_ASSERT(!engine.last_mark_price().has_value(), "Future mark price cannot exist prior to scheduled time!");
+
+    // Test time arithmetic overflow:
+    auto ovf = safe_add_time(std::numeric_limits<SimTime>::max() - 5, 10);
+    SIM_TEST_ASSERT(!ovf.has_value(), "safe_add_time must catch uint64_t overflow");
+
+    std::cout << "[PASS] regression_simulation_causality\n";
+    return true;
+}
+
+// REGRESSION 5: Integer accounting & Net PnL capitalization with buy fees
+bool regression_accounting_net_pnl_with_buy_fees() {
+    std::cout << "[RUN] regression_accounting_net_pnl_with_buy_fees...\n";
+    FeeConfig fees;
+    fees.maker_fee_bps = 10; // 0.10%
+    fees.taker_fee_bps = 20; // 0.20%
+    fees.fee_account_id = "FEES";
+
+    Ledger ledger(fees);
+    ledger.fund_account("TRADER", 10000, 0);
+    ledger.fund_account("COUNTERPARTY", 10000, 100);
+
+    // Trade 1: Buy 10 lots @ 100 as Taker.
+    // Notional = 1000. Taker fee = 1000 * 20 / 10000 = 2.
+    // Cash deducted = 1000 + 2 = 1002. Trader cash = 10000 - 1002 = 8998.
+    // Capitalized total cost = 1002.
+    TradeSettlement t1{1, 1000, 101, 102, "TRADER", "COUNTERPARTY", Side::Buy, 100, 10, 1000, 2, 1};
+    bool s1 = ledger.settle_trade(t1);
+    SIM_TEST_ASSERT(s1, "Trade 1 settled");
+
+    const auto* pos = ledger.get_account("TRADER");
+    SIM_TEST_ASSERT(pos->inventory == 10, "Inventory = 10");
+    SIM_TEST_ASSERT(pos->total_cost == 1002, "Total cost capitalized with buy fees = 1002");
+    SIM_TEST_ASSERT(pos->cost_basis_per_lot() == 100, "Cost basis per lot floor = 100");
+
+    // Trade 2: Sell 5 lots @ 120 as Maker.
+    // Notional = 600. Maker fee = 600 * 10 / 10000 = 0 (integer division: 6 / 10 = 0).
+    // Cost of 5 lots sold = 1002 * 5 / 10 = 501.
+    // Net proceeds = 600 - 0 = 600.
+    // Realized PnL on Trade 2 = 600 - 501 = +99.
+    // Remaining total cost = 1002 - 501 = 501.
+    TradeSettlement t2{2, 2000, 103, 104, "COUNTERPARTY", "TRADER", Side::Buy, 120, 5, 600, 1, 0};
+    bool s2 = ledger.settle_trade(t2);
+    SIM_TEST_ASSERT(s2, "Trade 2 settled");
+
+    SIM_TEST_ASSERT(pos->inventory == 5, "Remaining inventory = 5");
+    SIM_TEST_ASSERT(pos->total_cost == 501, "Remaining total cost = 501");
+    SIM_TEST_ASSERT(pos->realized_pnl == 99, "Realized PnL = +99");
+
+    // Trade 3: Sell remaining 5 lots @ 150 as Taker.
+    // Notional = 750. Taker fee = 750 * 20 / 10000 = 1.
+    // Cost of 5 lots sold = 501.
+    // Net proceeds = 750 - 1 = 749.
+    // Realized PnL on Trade 3 = 749 - 501 = +248.
+    // Total Realized PnL = 99 + 248 = +347.
+    TradeSettlement t3{3, 3000, 105, 106, "TRADER", "COUNTERPARTY", Side::Sell, 150, 5, 750, 1, 0};
+    bool s3 = ledger.settle_trade(t3);
+    SIM_TEST_ASSERT(s3, "Trade 3 settled");
+
+    SIM_TEST_ASSERT(pos->inventory == 0, "Inventory = 0");
+    SIM_TEST_ASSERT(pos->total_cost == 0, "Total cost reset to 0 when flat");
+    SIM_TEST_ASSERT(pos->realized_pnl == 347, "Total Realized PnL = +347");
+
+    // Verify Net Cash Change:
+    // Initial cash: 10000.
+    // Trade 1: -1002 -> 8998.
+    // Trade 2: +600 -> 9598.
+    // Trade 3: +749 -> 10347.
+    // Final cash: 10347. Net cash profit = +347!
+    SIM_TEST_ASSERT(pos->cash == 10347, "Final cash = 10347");
+    SIM_TEST_ASSERT(pos->cash - 10000 == pos->realized_pnl, "Net cash change must IDENTICALLY match realized PnL!");
+
+    std::cout << "[PASS] regression_accounting_net_pnl_with_buy_fees\n";
+    return true;
+}
+
+// REGRESSION 6: Expanded Ledger Invariant Audit & Reservation Protection
+bool regression_expanded_ledger_invariants() {
+    std::cout << "[RUN] regression_expanded_ledger_invariants...\n";
+    FeeConfig fees;
+    Ledger ledger(fees);
+
+    ledger.fund_account("USER_A", 10000, 50);
+    ledger.fund_account("USER_B", 10000, 50);
+
+    // Reserve for order 1
+    bool r1 = ledger.reserve_for_order("USER_A", 501, Side::Buy, 100, 10, 1000, 0);
+    SIM_TEST_ASSERT(r1, "Order 501 reserved");
+
+    // Cannot overwrite live order 501's reservation
+    bool r_dup = ledger.reserve_for_order("USER_B", 501, Side::Buy, 100, 5, 500, 0);
+    SIM_TEST_ASSERT(!r_dup, "Cannot overwrite live reservation with duplicate order ID");
+
+    // Unknown order cancellation does not alter state
+    bool c_unknown = ledger.release_reservation_on_cancel(99999, 10);
+    SIM_TEST_ASSERT(!c_unknown, "Canceling unknown order must return false");
+
+    // Invariant check passes
+    auto audit = ledger.verify_all_invariants(20000, 100);
+    SIM_TEST_ASSERT(audit.ok, audit.message);
+
+    std::cout << "[PASS] regression_expanded_ledger_invariants\n";
+    return true;
+}
+
+// REGRESSION 7: Strict Simulation Configuration Validation
+bool regression_config_strict_validation() {
+    std::cout << "[RUN] regression_config_strict_validation...\n";
+
+    // 1. Invalid tick size (zero)
+    std::string bad_json_tick = "{\"instrument\": {\"tick_size\": 0}}";
+    auto [c1, err1] = SimulationConfig::from_json_strict(bad_json_tick);
+    SIM_TEST_ASSERT(!c1.has_value(), "Must reject zero tick_size");
+
+    // 2. Invalid run horizon (zero)
+    std::string bad_json_horizon = "{\"run_horizon_ns\": 0}";
+    auto [c2, err2] = SimulationConfig::from_json_strict(bad_json_horizon);
+    SIM_TEST_ASSERT(!c2.has_value(), "Must reject zero run_horizon_ns");
+
+    // 3. Invalid maker fee (negative)
+    std::string bad_json_fee = "{\"fees\": {\"maker_fee_bps\": -5}}";
+    auto [c3, err3] = SimulationConfig::from_json_strict(bad_json_fee);
+    SIM_TEST_ASSERT(!c3.has_value(), "Must reject negative fee");
+
+    // 4. Identical strategy and background account IDs
+    std::string bad_json_accounts = "{\"strategy_account_id\": \"SAME\", \"background_account_id\": \"SAME\"}";
+    auto [c4, err4] = SimulationConfig::from_json_strict(bad_json_accounts);
+    SIM_TEST_ASSERT(!c4.has_value(), "Must reject identical account IDs");
+
+    // 5. Valid config must pass
+    SimulationConfig valid_cfg;
+    auto val_res = valid_cfg.validate();
+    SIM_TEST_ASSERT(val_res.valid, "Default config must be valid");
+
+    std::cout << "[PASS] regression_config_strict_validation\n";
+    return true;
+}
+
 int main() {
     std::cout << "Running MarketLab Milestone 2 Simulation & Accounting Tests...\n\n";
 
@@ -433,6 +705,13 @@ int main() {
     all_ok &= test_simulation_reproducibility();
     all_ok &= test_config_json_roundtrip();
     all_ok &= test_synthetic_scenario_execution();
+    all_ok &= regression_pending_buy_inventory_cap();
+    all_ok &= regression_self_trade_prevention_deep_book();
+    all_ok &= regression_market_buy_protected_ioc_execution();
+    all_ok &= regression_simulation_causality();
+    all_ok &= regression_accounting_net_pnl_with_buy_fees();
+    all_ok &= regression_expanded_ledger_invariants();
+    all_ok &= regression_config_strict_validation();
 
     if (all_ok) {
         std::cout << "\nALL MILESTONE 2 SIMULATION TESTS PASSED SUCCESSFULLY!\n";

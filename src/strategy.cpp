@@ -16,6 +16,7 @@ void InventoryAwareMarketMaker::on_start(SimTime, IStrategyContext&) {
 
 void InventoryAwareMarketMaker::on_market_data(SimTime now, const MarketObservation& obs, IStrategyContext& ctx) {
     if (!obs.mid_price) return;
+    if (config_.quote_size <= 0) return;
     if (last_quote_time_ > 0 && now < last_quote_time_ + config_.quote_interval_ns) {
         return;
     }

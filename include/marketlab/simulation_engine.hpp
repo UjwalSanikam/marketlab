@@ -38,8 +38,15 @@ struct SimulationConfig {
     int64_t background_starting_cash{10000000};    // 10,000,000 cash units
     Quantity background_starting_inventory{10000}; // 10,000 lots
 
+    struct ValidationResult {
+        bool valid{true};
+        std::string error;
+    };
+
+    [[nodiscard]] ValidationResult validate() const;
     [[nodiscard]] std::string to_json() const;
     [[nodiscard]] static SimulationConfig from_json(const std::string& json_str);
+    [[nodiscard]] static std::pair<std::optional<SimulationConfig>, std::string> from_json_strict(const std::string& json_str);
 };
 
 struct SimulationSummary {
@@ -123,6 +130,8 @@ public:
     [[nodiscard]] const Ledger& ledger() const noexcept { return ledger_; }
     [[nodiscard]] const OrderBook& book() const noexcept { return book_; }
     [[nodiscard]] const SimulationConfig& config() const noexcept { return config_; }
+    [[nodiscard]] SimTime last_market_data_time() const noexcept { return last_market_data_time_; }
+    [[nodiscard]] std::optional<Price> last_mark_price() const noexcept { return last_mark_price_; }
 
 private:
     void process_order_admission(const AccountId& account_id,

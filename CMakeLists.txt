@@ -19,6 +19,32 @@ else()
 endif()
 
 # Core library
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_COMMIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+execute_process(
+    COMMAND git status --porcelain
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE GIT_STATUS_OUTPUT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(GIT_COMMIT_HASH)
+    if(GIT_STATUS_OUTPUT)
+        set(MARKETLAB_BUILD_REVISION "${GIT_COMMIT_HASH}-dirty")
+    else()
+        set(MARKETLAB_BUILD_REVISION "${GIT_COMMIT_HASH}")
+    endif()
+else()
+    set(MARKETLAB_BUILD_REVISION "unavailable")
+endif()
+
+add_compile_definitions(MARKETLAB_BUILD_REVISION="${MARKETLAB_BUILD_REVISION}")
+
 add_library(marketlab_core
     src/order_book.cpp
     src/reference_matcher.cpp

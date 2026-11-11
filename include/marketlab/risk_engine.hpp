@@ -83,31 +83,38 @@ public:
             }
         }
 
-        // 5. Self-trade prevention check against opposing top-of-book
+        // 5. Self-trade prevention check across the ENTIRE executable matching path
         if (!limits_.allow_self_trade) {
+            Quantity matchable_so_far = 0;
             if (cmd.side == Side::Buy) {
-                if (!book.asks().empty()) {
-                    const auto& top_level = book.asks().begin()->second;
-                    if (!top_level.orders.empty()) {
-                        OrderId top_maker_id = top_level.orders.front().order_id;
-                        auto owner = ledger.get_order_owner(top_maker_id);
-                        if (owner && *owner == account_id && (cmd.type == OrderType::Market || cmd.price >= top_level.price)) {
+                for (const auto& [lvl_price, level] : book.asks()) {
+                    if (cmd.type == OrderType::Limit && lvl_price > cmd.price) break;
+                    if (cmd.type == OrderType::Market && effective_price > 0 && lvl_price > effective_price) break;
+                    for (const auto& maker : level.orders) {
+                        auto owner = ledger.get_order_owner(maker.order_id);
+                        if (owner && *owner == account_id) {
                             result.reject_reason = RiskRejectReason::SelfTradeProhibited;
                             return result;
                         }
+                        matchable_so_far += maker.remaining_quantity;
+                        if (matchable_so_far >= cmd.quantity) break;
                     }
+                    if (matchable_so_far >= cmd.quantity) break;
                 }
             } else {
-                if (!book.bids().empty()) {
-                    const auto& top_level = book.bids().begin()->second;
-                    if (!top_level.orders.empty()) {
-                        OrderId top_maker_id = top_level.orders.front().order_id;
-                        auto owner = ledger.get_order_owner(top_maker_id);
-                        if (owner && *owner == account_id && (cmd.type == OrderType::Market || cmd.price <= top_level.price)) {
+                for (const auto& [lvl_price, level] : book.bids()) {
+                    if (cmd.type == OrderType::Limit && lvl_price < cmd.price) break;
+                    if (cmd.type == OrderType::Market && effective_price > 0 && lvl_price < effective_price) break;
+                    for (const auto& maker : level.orders) {
+                        auto owner = ledger.get_order_owner(maker.order_id);
+                        if (owner && *owner == account_id) {
                             result.reject_reason = RiskRejectReason::SelfTradeProhibited;
                             return result;
                         }
+                        matchable_so_far += maker.remaining_quantity;
+                        if (matchable_so_far >= cmd.quantity) break;
                     }
+                    if (matchable_so_far >= cmd.quantity) break;
                 }
             }
         }
@@ -124,16 +131,26 @@ public:
         Quantity inv_needed = 0;
 
         if (cmd.side == Side::Buy) {
-            // Projected inventory check
-            auto proj_inv = CheckedMath::safe_add_quantity(pos.inventory, cmd.quantity);
+            // Projected inventory check includes settled inventory + all pending buy orders + current order
+            auto pending_plus_curr = CheckedMath::safe_add_quantity(pos.pending_buy_quantity, cmd.quantity);
+            if (!pending_plus_curr) {
+                result.reject_reason = RiskRejectReason::MaxInventoryExceeded;
+                return result;
+            }
+            auto proj_inv = CheckedMath::safe_add_quantity(pos.inventory, *pending_plus_curr);
             if (!proj_inv || *proj_inv > limits_.max_inventory) {
                 result.reject_reason = RiskRejectReason::MaxInventoryExceeded;
                 return result;
             }
 
-            // Cash reservation: conservative notional + max taker fee
-            int64_t fee_res = ledger.fee_config().conservative_taker_fee_reservation(notional);
-            cash_needed = notional + fee_res;
+            // Cash reservation: conservative notional + max applicable maker/taker fee
+            int64_t fee_res = ledger.fee_config().conservative_fee_reservation(notional);
+            auto total_cash_needed = CheckedMath::safe_add_quantity(notional, fee_res);
+            if (!total_cash_needed) {
+                result.reject_reason = RiskRejectReason::OrderNotionalExceedsMax;
+                return result;
+            }
+            cash_needed = *total_cash_needed;
 
             if (pos.available_cash() < cash_needed) {
                 result.reject_reason = RiskRejectReason::InsufficientAvailableCash;

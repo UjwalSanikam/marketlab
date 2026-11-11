@@ -19,9 +19,10 @@ struct AccountPosition {
     Quantity inventory{0};            // Settled base asset inventory (lots)
     int64_t reserved_cash{0};         // Cash reserved for open buy orders
     Quantity reserved_inventory{0};   // Inventory reserved for open sell orders
+    Quantity pending_buy_quantity{0}; // Total pending lots across open buy orders
     int64_t total_fees_paid{0};       // Cumulative fees paid
-    int64_t realized_pnl{0};          // Cumulative realized PnL
-    double avg_cost_basis{0.0};       // Average cost per unit of inventory
+    int64_t realized_pnl{0};          // Cumulative net realized PnL
+    int64_t total_cost{0};            // Cumulative cost of current inventory including buy fees
 
     [[nodiscard]] int64_t available_cash() const noexcept {
         return cash - reserved_cash;
@@ -31,10 +32,15 @@ struct AccountPosition {
         return inventory - reserved_inventory;
     }
 
+    [[nodiscard]] int64_t cost_basis_per_lot() const noexcept {
+        return (inventory > 0) ? (total_cost / inventory) : 0;
+    }
+
     [[nodiscard]] std::optional<int64_t> calculate_unrealized_pnl(std::optional<Price> mark_price) const noexcept {
-        if (!mark_price || inventory == 0) return 0;
-        double diff = static_cast<double>(*mark_price) - avg_cost_basis;
-        return static_cast<int64_t>(diff * static_cast<double>(inventory));
+        if (inventory == 0) return 0;
+        if (!mark_price) return std::nullopt;
+        int64_t current_val = *mark_price * inventory;
+        return current_val - total_cost;
     }
 };
 
@@ -64,6 +70,11 @@ struct TradeSettlement {
     int64_t maker_fee{0};
 };
 
+struct LedgerAuditResult {
+    bool ok{true};
+    std::string message;
+};
+
 class Ledger {
 public:
     explicit Ledger(FeeConfig fee_config = {}) : fee_config_(std::move(fee_config)) {
@@ -74,7 +85,7 @@ public:
     // Account setup
     AccountPosition& get_or_create_account(const AccountId& id);
     [[nodiscard]] const AccountPosition* get_account(const AccountId& id) const noexcept;
-    void fund_account(const AccountId& id, int64_t cash, Quantity inventory);
+    void fund_account(const AccountId& id, int64_t cash, Quantity inventory, int64_t initial_cost_per_lot = 0);
 
     // Reservation lifecycle
     bool reserve_for_order(const AccountId& account_id,
@@ -95,6 +106,7 @@ public:
     // Audit and conservation checks
     [[nodiscard]] bool verify_cash_conservation(int64_t expected_total_cash) const noexcept;
     [[nodiscard]] bool verify_inventory_conservation(Quantity expected_total_inv) const noexcept;
+    [[nodiscard]] LedgerAuditResult verify_all_invariants(int64_t expected_total_cash, Quantity expected_total_inv) const noexcept;
     [[nodiscard]] int64_t get_total_cash() const noexcept;
     [[nodiscard]] Quantity get_total_inventory() const noexcept;
 

@@ -64,10 +64,11 @@ MarketLab enforces complete separation between the authoritative exchange runtim
 ## 2. Milestone 2 Capabilities
 
 ### 1. Virtual Clock & Deterministic Min-Heap Event Scheduler
-- **Time Representation**: Pure integer simulated nanoseconds (`SimTime`), with checked arithmetic guarding against overflow. Wall-clock timing is prohibited in canonical simulation data.
+- **Time Representation**: Pure integer simulated nanoseconds (`SimTime`), with checked arithmetic guarding against overflow. Wall-clock timing is prohibited in canonical simulation data. Time additions use `safe_add_time` and reject overflow rather than defaulting to immediate execution.
 - **Priority Queue**: Stable min-heap ordered by `(timestamp, priority_tier, sequence_id)`.
 - **Deterministic Tie-Breaking**: Equal-timestamp events are strictly ordered by documented priority tiers, followed by FIFO sequence ID:
-  1. `Tier 1 (MarketDataDelivery)`: Market observations delivered to strategy mailboxes.
+  0. `Tier 0 (MarketDataAuthoritative)`: Authoritative market data state updates execute at observation time $T_{\text{obs}}$ before strategy visibility.
+  1. `Tier 1 (MarketDataDelivery)`: Market observations delivered to strategy mailboxes at $T_{\text{obs}} + \text{delay}$.
   2. `Tier 2 (StrategyWakeup)`: Strategy periodic wakeups and timer hooks.
   3. `Tier 3 (OrderAdmission)`: Strategy order submissions and cancellations arriving at the runtime.
   4. `Tier 4 (ExecutionReportDelivery)`: Delayed fill reports, cancels, and risk rejections delivered to strategies.
@@ -84,30 +85,36 @@ MarketLab enforces complete separation between the authoritative exchange runtim
     $$\text{Price}_{\text{reservation}} = \text{Mid} - (\text{Inventory}_{\text{current}} - \text{Inventory}_{\text{target}}) \times \text{SkewPerLot}$$
   - Places symmetric bid and ask quotes around the reservation price:
     $$\text{Bid} = \text{Price}_{\text{reservation}} - \text{HalfSpread}, \quad \text{Ask} = \text{Price}_{\text{reservation}} + \text{HalfSpread}$$
-  - Dynamically updates active resting quotes and cancels stale quotes.
+  - Dynamically updates active resting quotes and cancels stale quotes. Quoting cleanly halts if `quote_size <= 0`.
 
 ### 3. Pre-Trade Risk Engine & Atomic Reservations
 - **Order Size & Notional Limits**: Hard caps on single-order quantity (`max_order_qty`) and notional value (`max_order_notional`).
 - **Strict Short-Selling Prohibition**: Sell orders are rejected if requested quantity exceeds available (unreserved) inventory (`available_inventory < qty`).
-- **Conservative Cash Reservation for Buys**: To prevent overdrafts from fees, buy orders atomically reserve:
-  $$\text{ReservedCash} = \text{Notional} + \text{ConservativeTakerFee}$$
-- **Market Buy Protection Price**: Market buy orders require an explicit protection price cap to bound potential cash liability.
+- **Projected Inventory Limit**: Buy orders verify that settled inventory plus outstanding pending buy orders plus the incoming order quantity does not breach the inventory cap:
+  $$\text{Inventory}_{\text{settled}} + \text{Quantity}_{\text{pending\_buys}} + \text{Quantity}_{\text{new}} \le \text{MaxInventory}$$
+  Capacity is released atomically upon fills, cancellations, and risk rejections.
+- **Conservative Cash Reservation for Buys**: Buy orders atomically reserve cash covering notional plus the maximum applicable maker/taker fee rate using 128-bit checked arithmetic:
+  $$\text{FeeRes} = \left\lceil \frac{\text{Notional} \times \max(\text{Fee}_{\text{maker}}, \text{Fee}_{\text{taker}})}{10,000} \right\rceil$$
+- **Protected Market-Buy Execution**: Market buys require an explicit protection price cap. During runtime execution, market buys execute through protected IOC limit semantics bounded at the protection cap, preventing unexpected sweeps of deep resting liquidity and ensuring account cash never drops below zero.
 - **Market Data Staleness Guard**: Orders are rejected if simulated current time exceeds the latest observation timestamp plus `max_data_age_ns`.
-- **Self-Trade Prevention (STP)**: Rejects crossing orders if the resting top-of-book order belongs to the same account.
+- **Deep-Book Self-Trade Prevention (STP)**: Rejects crossing orders across the entire executable depth and across subsequent orders at the same price level.
 - **Cancel Ownership Verification**: Prevents unauthorized cancellation of orders belonging to other accounts.
 
 ### 4. Portfolio Ledger & Conservation Accounting
 - **Authoritative vs. Observed Separation**: Balances and reservations are authoritatively settled at matching execution time $T_{\text{exec}}$, while the strategy's internal position representation updates only when the delayed execution report arrives at $T_{\text{exec}} + \text{execution\_report\_delay}$.
-- **Average Cost Basis & PnL**:
-  - Position cost basis updates dynamically on purchases:
-    $$\text{CostBasis}_{\text{new}} = \frac{\text{CostBasis}_{\text{prev}} \times \text{Inventory}_{\text{prev}} + \text{Notional}}{\text{Inventory}_{\text{new}}}$$
-  - Realized PnL is locked in on sales:
-    $$\text{RealizedPnL} = (\text{Price}_{\text{trade}} - \text{CostBasis}) \times \text{Quantity} - \text{Fee}_{\text{seller}}$$
-  - Mark-to-market unrealized PnL tracks valuation relative to mid-price.
-- **Strict Exact Conservation**:
-  $$\sum_{\text{accounts}} \Delta \text{Cash} = 0, \quad \sum_{\text{accounts}} \Delta \text{Inventory} = 0$$
-  Buyer cash paid equals seller cash received plus exchange fees collected. Inventory transferred out of seller equals inventory received by buyer.
-- **Duplicate Fill Idempotence**: Duplicate trade execution reports are rejected, preventing double-application.
+- **Pure Integer Cost Basis & Capitalized Buy Fees**:
+  - Zero floating-point calculations in monetary balances and cost accounting.
+  - Buy-side trading fees are capitalized directly into inventory total acquisition cost:
+    $$\text{TotalCost}_{\text{new}} = \text{TotalCost}_{\text{prev}} + \text{Notional}_{\text{buy}} + \text{Fee}_{\text{buy}}$$
+    $$\text{CostBasisPerLot} = \lfloor \text{TotalCost} / \text{Inventory} \rfloor$$
+  - Realized PnL is computed on sales using exact integer cost-of-goods-sold and net proceeds:
+    $$\text{RealizedPnL} = (\text{Notional}_{\text{sell}} - \text{Fee}_{\text{sell}}) - \left\lfloor \frac{\text{TotalCost} \times \text{Qty}_{\text{sold}}}{\text{Inventory}_{\text{prev}}} \right\rfloor$$
+  - Net cash change matches realized PnL identically over full trading cycles.
+- **Comprehensive Ledger Invariant Verification**:
+  - Global cash and inventory conservation: $\sum \Delta \text{Cash} = 0, \sum \Delta \text{Inventory} = 0$.
+  - Non-negative available cash and available inventory for all participant accounts.
+  - Exact order-to-reservation reconciliation: $\text{ReservedCash} \equiv \sum \text{OrderCashRes}$, $\text{ReservedInventory} \equiv \sum \text{OrderInvRes}$.
+- **Duplicate Fill & Cancellation Idempotence**: Duplicate trade execution reports and unauthorized or unknown order cancels are rejected without altering ledger state.
 
 ---
 
@@ -217,7 +224,7 @@ Simulating deterministic trading session...
 =========================================================
 Simulated Time:      9.945 s (9945000000 ns)
 Termination Reason:  ALL_EVENTS_PROCESSED
-Total Events:        593 events in 236 us service time
+Total Events:        803 events in 250 us service time
 
 --- Invariant & Conservation Auditing ---
 Cash Conservation:      [PASS] (Initial: 11000000, Final: 11000000)
@@ -231,8 +238,8 @@ Trades Executed:     13
 Final Cash:          984534
 Final Inventory:     202 lots
 Realized PnL:        0
-Unrealized PnL:      5350
-Total PnL:           5350
+Unrealized PnL:      5542
+Total PnL:           5542
 Trading Fees Paid:   11
 
 --- Exchange & Ledger Totals ---
@@ -244,8 +251,8 @@ Total Fees Accrued:  36 (Account: EXCHANGE_FEES)
 --- Canonical SHA-256 Hashes ---
 Events SHA-256:   072eabb6a54f3ecc7ea3d652a714d92332261b5e809a387009f42c9c529c2c94
 Fills SHA-256:    0ac8b44b4a2f40ba5e4be94fb46f2ea7e7d27d5bad55823ba7b12ef26f38d464
-State SHA-256:    910bf36d3b4894af35a579a6f96c9125aaf0ec12f9fe35c37961284f92d66746
-Manifest SHA-256: e991fb345b56babc025a29462b73bcc095aefccc6a5403e0dfde420629b48a27
+State SHA-256:    3ff7eadcb1792931e2ec00125efd5eda203d5b772084146b9f36bfe47a0826bb
+Manifest SHA-256: de45f9781553881ae80dc8fd20e2018dabfe14dd5f68793e170677c8b46de906
 =========================================================
 ```
 

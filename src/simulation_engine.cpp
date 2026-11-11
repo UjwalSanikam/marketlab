@@ -7,6 +7,68 @@
 
 namespace marketlab {
 
+#ifndef MARKETLAB_BUILD_REVISION
+#define MARKETLAB_BUILD_REVISION "unavailable"
+#endif
+
+namespace {
+
+std::string get_build_environment() {
+    std::string env;
+#if defined(_WIN32)
+    env += "Windows x86_64";
+#elif defined(__linux__)
+    env += "Linux x86_64";
+#elif defined(__APPLE__)
+    env += "macOS";
+#else
+    env += "Unknown OS";
+#endif
+    env += ", ";
+#if defined(__clang__)
+    env += "Clang ";
+    env += __clang_version__;
+#elif defined(__GNUC__)
+    env += "GCC ";
+    env += __VERSION__;
+#elif defined(_MSC_VER)
+    env += "MSVC ";
+    env += std::to_string(_MSC_VER);
+#else
+    env += "Unknown Compiler";
+#endif
+    env += " C++20";
+    return env;
+}
+
+} // namespace
+
+SimulationConfig::ValidationResult SimulationConfig::validate() const {
+    if (run_horizon_ns == 0) return {false, "run_horizon_ns must be greater than 0"};
+    if (max_events == 0) return {false, "max_events must be greater than 0"};
+    if (instrument.symbol.empty()) return {false, "instrument.symbol cannot be empty"};
+    if (instrument.tick_size <= 0) return {false, "instrument.tick_size must be greater than 0"};
+    if (instrument.lot_size <= 0) return {false, "instrument.lot_size must be greater than 0"};
+    if (fees.maker_fee_bps < 0 || fees.maker_fee_bps > 10000) return {false, "fees.maker_fee_bps must be between 0 and 10000"};
+    if (fees.taker_fee_bps < 0 || fees.taker_fee_bps > 10000) return {false, "fees.taker_fee_bps must be between 0 and 10000"};
+    if (fees.fee_account_id.empty()) return {false, "fees.fee_account_id cannot be empty"};
+    if (strategy_account_id.empty()) return {false, "strategy_account_id cannot be empty"};
+    if (background_account_id.empty()) return {false, "background_account_id cannot be empty"};
+    if (strategy_account_id == background_account_id) return {false, "strategy_account_id and background_account_id cannot be identical"};
+    if (strategy_account_id == fees.fee_account_id) return {false, "strategy_account_id and fee_account_id cannot be identical"};
+    if (background_account_id == fees.fee_account_id) return {false, "background_account_id and fee_account_id cannot be identical"};
+    if (risk.max_order_qty <= 0) return {false, "risk.max_order_qty must be greater than 0"};
+    if (risk.max_order_notional <= 0) return {false, "risk.max_order_notional must be greater than 0"};
+    if (risk.max_inventory <= 0) return {false, "risk.max_inventory must be greater than 0"};
+    if (strategy_config.quote_size <= 0) return {false, "strategy_config.quote_size must be greater than 0"};
+    if (strategy_config.half_spread <= 0) return {false, "strategy_config.half_spread must be greater than 0"};
+    if (strategy_starting_cash < 0) return {false, "strategy_starting_cash cannot be negative"};
+    if (strategy_starting_inventory < 0) return {false, "strategy_starting_inventory cannot be negative"};
+    if (background_starting_cash < 0) return {false, "background_starting_cash cannot be negative"};
+    if (background_starting_inventory < 0) return {false, "background_starting_inventory cannot be negative"};
+    return {true, ""};
+}
+
 std::string SimulationConfig::to_json() const {
     std::ostringstream ss;
     ss << "{\n"
@@ -53,7 +115,7 @@ std::string SimulationConfig::to_json() const {
     return ss.str();
 }
 
-SimulationConfig SimulationConfig::from_json(const std::string& json_str) {
+std::pair<std::optional<SimulationConfig>, std::string> SimulationConfig::from_json_strict(const std::string& json_str) {
     SimulationConfig cfg;
     auto get_str = [&](const std::string& key) -> std::optional<std::string> {
         std::string pattern = "\"" + key + "\"\\s*:\\s*(\"[^\"]*\"|[-+]?[0-9a-zA-Z_.]+)?";
@@ -69,50 +131,154 @@ SimulationConfig SimulationConfig::from_json(const std::string& json_str) {
         return std::nullopt;
     };
 
-    if (auto v = get_str("seed")) if (auto i = Serializer::parse_strict_integer<uint64_t>(*v)) cfg.seed = *i;
-    if (auto v = get_str("run_horizon_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.run_horizon_ns = *i;
-    if (auto v = get_str("max_events")) if (auto i = Serializer::parse_strict_integer<size_t>(*v)) cfg.max_events = *i;
+    if (auto v = get_str("seed")) {
+        auto i = Serializer::parse_strict_integer<uint64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'seed': " + *v};
+        cfg.seed = *i;
+    }
+    if (auto v = get_str("run_horizon_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'run_horizon_ns': " + *v};
+        cfg.run_horizon_ns = *i;
+    }
+    if (auto v = get_str("max_events")) {
+        auto i = Serializer::parse_strict_integer<size_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'max_events': " + *v};
+        cfg.max_events = *i;
+    }
 
     if (auto v = get_str("symbol")) cfg.instrument.symbol = *v;
-    if (auto v = get_str("tick_size")) if (auto i = Serializer::parse_strict_integer<Price>(*v)) cfg.instrument.tick_size = *i;
-    if (auto v = get_str("lot_size")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.instrument.lot_size = *i;
+    if (auto v = get_str("tick_size")) {
+        auto i = Serializer::parse_strict_integer<Price>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'tick_size': " + *v};
+        cfg.instrument.tick_size = *i;
+    }
+    if (auto v = get_str("lot_size")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'lot_size': " + *v};
+        cfg.instrument.lot_size = *i;
+    }
 
-    if (auto v = get_str("maker_fee_bps")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.fees.maker_fee_bps = *i;
-    if (auto v = get_str("taker_fee_bps")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.fees.taker_fee_bps = *i;
+    if (auto v = get_str("maker_fee_bps")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'maker_fee_bps': " + *v};
+        cfg.fees.maker_fee_bps = *i;
+    }
+    if (auto v = get_str("taker_fee_bps")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'taker_fee_bps': " + *v};
+        cfg.fees.taker_fee_bps = *i;
+    }
     if (auto v = get_str("fee_account_id")) cfg.fees.fee_account_id = *v;
 
-    if (auto v = get_str("market_data_delay_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.market_data_delay = *i;
-    if (auto v = get_str("market_data_delay")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.market_data_delay = *i;
-    if (auto v = get_str("strategy_delay_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.strategy_delay = *i;
-    if (auto v = get_str("strategy_delay")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.strategy_delay = *i;
-    if (auto v = get_str("order_entry_delay_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.order_entry_delay = *i;
-    if (auto v = get_str("order_entry_delay")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.order_entry_delay = *i;
-    if (auto v = get_str("execution_report_delay_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.execution_report_delay = *i;
-    if (auto v = get_str("execution_report_delay")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.latencies.execution_report_delay = *i;
+    if (auto v = get_str("market_data_delay_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'market_data_delay_ns': " + *v};
+        cfg.latencies.market_data_delay = *i;
+    }
+    if (auto v = get_str("strategy_delay_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_delay_ns': " + *v};
+        cfg.latencies.strategy_delay = *i;
+    }
+    if (auto v = get_str("order_entry_delay_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'order_entry_delay_ns': " + *v};
+        cfg.latencies.order_entry_delay = *i;
+    }
+    if (auto v = get_str("execution_report_delay_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'execution_report_delay_ns': " + *v};
+        cfg.latencies.execution_report_delay = *i;
+    }
 
-    if (auto v = get_str("max_order_qty")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.risk.max_order_qty = *i;
-    if (auto v = get_str("max_order_quantity")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.risk.max_order_qty = *i;
-    if (auto v = get_str("max_order_notional")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.risk.max_order_notional = *i;
-    if (auto v = get_str("max_inventory")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.risk.max_inventory = *i;
-    if (auto v = get_str("max_data_age_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.risk.max_data_age_ns = *i;
-    if (auto v = get_str("allow_self_trade")) cfg.risk.allow_self_trade = (*v == "true");
+    if (auto v = get_str("max_order_qty")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'max_order_qty': " + *v};
+        cfg.risk.max_order_qty = *i;
+    }
+    if (auto v = get_str("max_order_notional")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'max_order_notional': " + *v};
+        cfg.risk.max_order_notional = *i;
+    }
+    if (auto v = get_str("max_inventory")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'max_inventory': " + *v};
+        cfg.risk.max_inventory = *i;
+    }
+    if (auto v = get_str("max_data_age_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'max_data_age_ns': " + *v};
+        cfg.risk.max_data_age_ns = *i;
+    }
+    if (auto v = get_str("allow_self_trade")) {
+        if (*v != "true" && *v != "false") return {std::nullopt, "Invalid boolean for 'allow_self_trade': " + *v};
+        cfg.risk.allow_self_trade = (*v == "true");
+    }
 
-    if (auto v = get_str("quote_size")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.strategy_config.quote_size = *i;
-    if (auto v = get_str("half_spread")) if (auto i = Serializer::parse_strict_integer<Price>(*v)) cfg.strategy_config.half_spread = *i;
-    if (auto v = get_str("spread_ticks")) if (auto i = Serializer::parse_strict_integer<Price>(*v)) cfg.strategy_config.half_spread = *i / 2;
-    if (auto v = get_str("inventory_target")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.strategy_config.inventory_target = *i;
-    if (auto v = get_str("skew_per_lot")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.strategy_config.skew_per_lot = *i;
-    if (auto v = get_str("quote_interval_ns")) if (auto i = Serializer::parse_strict_integer<SimTime>(*v)) cfg.strategy_config.quote_interval_ns = *i;
+    if (auto v = get_str("quote_size")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'quote_size': " + *v};
+        cfg.strategy_config.quote_size = *i;
+    }
+    if (auto v = get_str("half_spread")) {
+        auto i = Serializer::parse_strict_integer<Price>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'half_spread': " + *v};
+        cfg.strategy_config.half_spread = *i;
+    }
+    if (auto v = get_str("inventory_target")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'inventory_target': " + *v};
+        cfg.strategy_config.inventory_target = *i;
+    }
+    if (auto v = get_str("skew_per_lot")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'skew_per_lot': " + *v};
+        cfg.strategy_config.skew_per_lot = *i;
+    }
+    if (auto v = get_str("quote_interval_ns")) {
+        auto i = Serializer::parse_strict_integer<SimTime>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'quote_interval_ns': " + *v};
+        cfg.strategy_config.quote_interval_ns = *i;
+    }
 
     if (auto v = get_str("strategy_account_id")) cfg.strategy_account_id = *v;
-    if (auto v = get_str("strategy_starting_cash")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.strategy_starting_cash = *i;
-    if (auto v = get_str("strategy_starting_inventory")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.strategy_starting_inventory = *i;
+    if (auto v = get_str("strategy_starting_cash")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_starting_cash': " + *v};
+        cfg.strategy_starting_cash = *i;
+    }
+    if (auto v = get_str("strategy_starting_inventory")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'strategy_starting_inventory': " + *v};
+        cfg.strategy_starting_inventory = *i;
+    }
 
     if (auto v = get_str("background_account_id")) cfg.background_account_id = *v;
-    if (auto v = get_str("background_starting_cash")) if (auto i = Serializer::parse_strict_integer<int64_t>(*v)) cfg.background_starting_cash = *i;
-    if (auto v = get_str("background_starting_inventory")) if (auto i = Serializer::parse_strict_integer<Quantity>(*v)) cfg.background_starting_inventory = *i;
+    if (auto v = get_str("background_starting_cash")) {
+        auto i = Serializer::parse_strict_integer<int64_t>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'background_starting_cash': " + *v};
+        cfg.background_starting_cash = *i;
+    }
+    if (auto v = get_str("background_starting_inventory")) {
+        auto i = Serializer::parse_strict_integer<Quantity>(*v);
+        if (!i) return {std::nullopt, "Invalid numeric format for 'background_starting_inventory': " + *v};
+        cfg.background_starting_inventory = *i;
+    }
 
-    return cfg;
+    auto val_res = cfg.validate();
+    if (!val_res.valid) {
+        return {std::nullopt, "Validation error: " + val_res.error};
+    }
+
+    return {cfg, ""};
+}
+
+SimulationConfig SimulationConfig::from_json(const std::string& json_str) {
+    auto [cfg_opt, _] = from_json_strict(json_str);
+    if (cfg_opt) return *cfg_opt;
+    return SimulationConfig{};
 }
 
 SimulationEngine::SimulationEngine(SimulationConfig config)
@@ -149,13 +315,31 @@ void SimulationEngine::submit_order(Side side, OrderType type, Price price, Quan
 
     // Simulated latency: strategy decision time + network order entry delay
     auto delay_opt = safe_add_time(config_.latencies.strategy_delay, config_.latencies.order_entry_delay);
-    SimTime total_delay = delay_opt ? *delay_opt : 0;
-    auto arr_opt = safe_add_time(scheduler_.now(), total_delay);
-    SimTime arrival_time = arr_opt ? *arr_opt : scheduler_.now();
+    if (!delay_opt) {
+        ++strategy_risk_rejections_;
+        ExecutionReport rpt{ExecutionReport::Type::Rejected, scheduler_.now(), id, side, price, qty, qty, "TIME_ARITHMETIC_OVERFLOW"};
+        if (strategy_) strategy_->on_execution_report(scheduler_.now(), rpt, *this);
+        return;
+    }
+    auto arr_opt = safe_add_time(scheduler_.now(), *delay_opt);
+    if (!arr_opt) {
+        ++strategy_risk_rejections_;
+        ExecutionReport rpt{ExecutionReport::Type::Rejected, scheduler_.now(), id, side, price, qty, qty, "TIME_ARITHMETIC_OVERFLOW"};
+        if (strategy_) strategy_->on_execution_report(scheduler_.now(), rpt, *this);
+        return;
+    }
+    SimTime arrival_time = *arr_opt;
 
-    Price protection_price = (type == OrderType::Market && side == Side::Buy)
-        ? (last_mark_price_ ? (*last_mark_price_ + 10) : 1000)
-        : price;
+    Price protection_price = price;
+    if (type == OrderType::Market && side == Side::Buy) {
+        if (price > 0) {
+            protection_price = price;
+        } else if (last_mark_price_.has_value()) {
+            protection_price = *last_mark_price_ + 10;
+        } else {
+            protection_price = 0; // Explicit cap required; risk engine will reject
+        }
+    }
 
     scheduler_.schedule(arrival_time, EventPriority::OrderAdmission, [this, cmd, protection_price](SimTime) {
         this->process_order_admission(config_.strategy_account_id, cmd, protection_price);
@@ -167,9 +351,18 @@ void SimulationEngine::cancel_order(OrderId order_id) {
     CancelOrderCommand cmd{seq, order_id};
 
     auto delay_opt = safe_add_time(config_.latencies.strategy_delay, config_.latencies.order_entry_delay);
-    SimTime total_delay = delay_opt ? *delay_opt : 0;
-    auto arr_opt = safe_add_time(scheduler_.now(), total_delay);
-    SimTime arrival_time = arr_opt ? *arr_opt : scheduler_.now();
+    if (!delay_opt) {
+        ExecutionReport rpt{ExecutionReport::Type::Rejected, scheduler_.now(), order_id, Side::Buy, 0, 0, 0, "TIME_ARITHMETIC_OVERFLOW"};
+        if (strategy_) strategy_->on_execution_report(scheduler_.now(), rpt, *this);
+        return;
+    }
+    auto arr_opt = safe_add_time(scheduler_.now(), *delay_opt);
+    if (!arr_opt) {
+        ExecutionReport rpt{ExecutionReport::Type::Rejected, scheduler_.now(), order_id, Side::Buy, 0, 0, 0, "TIME_ARITHMETIC_OVERFLOW"};
+        if (strategy_) strategy_->on_execution_report(scheduler_.now(), rpt, *this);
+        return;
+    }
+    SimTime arrival_time = *arr_opt;
 
     scheduler_.schedule(arrival_time, EventPriority::OrderAdmission, [this, cmd](SimTime) {
         this->process_cancel_admission(config_.strategy_account_id, cmd);
@@ -187,9 +380,16 @@ void SimulationEngine::submit_background_order(const AccountId& account_id,
     SeqNum seq = ++next_cmd_seq_;
     NewOrderCommand cmd{seq, id, side, type, price, qty, tif};
 
-    Price protection_price = (type == OrderType::Market && side == Side::Buy)
-        ? (last_mark_price_ ? (*last_mark_price_ + 10) : 1000)
-        : price;
+    Price protection_price = price;
+    if (type == OrderType::Market && side == Side::Buy) {
+        if (price > 0) {
+            protection_price = price;
+        } else if (last_mark_price_.has_value()) {
+            protection_price = *last_mark_price_ + 10;
+        } else {
+            protection_price = 0;
+        }
+    }
 
     scheduler_.schedule(arrival_time, EventPriority::BackgroundArrival, [this, account_id, cmd, protection_price](SimTime) {
         this->process_order_admission(account_id, cmd, protection_price);
@@ -215,16 +415,20 @@ void SimulationEngine::emit_market_observation(SimTime time,
                                                Quantity last_trade_qty) {
     MarketObservation obs{time, best_bid, best_ask, mid_price, last_trade_price, last_trade_qty};
 
-    if (mid_price) {
-        last_mark_price_ = mid_price;
-    } else if (last_trade_price) {
-        last_mark_price_ = last_trade_price;
-    }
+    // 1. Authoritative runtime state update executes only at virtual timestamp 'time'
+    scheduler_.schedule(time, EventPriority::MarketDataAuthoritative, [this, mid_price, last_trade_price, time](SimTime) {
+        if (mid_price) {
+            this->last_mark_price_ = mid_price;
+        } else if (last_trade_price) {
+            this->last_mark_price_ = last_trade_price;
+        }
+        this->last_market_data_time_ = time;
+    });
 
-    last_market_data_time_ = time;
-
+    // 2. Schedule strategy observation delivery at time + market_data_delay
     auto del_opt = safe_add_time(time, config_.latencies.market_data_delay);
-    SimTime delivery_time = del_opt ? *del_opt : time;
+    if (!del_opt) return; // Time overflow
+    SimTime delivery_time = *del_opt;
 
     scheduler_.schedule(delivery_time, EventPriority::MarketDataDelivery, [this, obs](SimTime t) {
         if (strategy_) {
@@ -248,11 +452,12 @@ void SimulationEngine::process_order_admission(const AccountId& account_id,
             ++strategy_risk_rejections_;
             // Schedule rejected report delivery to strategy
             auto rpt_time = safe_add_time(now, config_.latencies.execution_report_delay);
-            SimTime del_time = rpt_time ? *rpt_time : now;
-            ExecutionReport rpt{ExecutionReport::Type::Rejected, del_time, cmd.order_id, cmd.side, cmd.price, cmd.quantity, cmd.quantity, std::string(to_string(risk_res.reject_reason))};
-            scheduler_.schedule(del_time, EventPriority::ExecutionReportDelivery, [this, rpt](SimTime t) {
-                if (strategy_) strategy_->on_execution_report(t, rpt, *this);
-            });
+            if (rpt_time) {
+                ExecutionReport rpt{ExecutionReport::Type::Rejected, *rpt_time, cmd.order_id, cmd.side, cmd.price, cmd.quantity, cmd.quantity, std::string(to_string(risk_res.reject_reason))};
+                scheduler_.schedule(*rpt_time, EventPriority::ExecutionReportDelivery, [this, rpt](SimTime t) {
+                    if (strategy_) strategy_->on_execution_report(t, rpt, *this);
+                });
+            }
         }
 
         std::ostringstream ss;
@@ -268,9 +473,15 @@ void SimulationEngine::process_order_admission(const AccountId& account_id,
         ++strategy_orders_accepted_;
     }
 
-    // 2. Submit to Matching Engine
+    // 2. Submit to Matching Engine with protected IOC execution for market buys
     std::vector<Event> matcher_events;
-    book_.process(cmd, matcher_events);
+    NewOrderCommand matcher_cmd = cmd;
+    if (cmd.type == OrderType::Market && cmd.side == Side::Buy) {
+        matcher_cmd.type = OrderType::Limit;
+        matcher_cmd.price = protection_price;
+        matcher_cmd.tif = TimeInForce::IOC;
+    }
+    book_.process(matcher_cmd, matcher_events);
 
     // 3. Process Engine Events & Settle
     for (const auto& ev : matcher_events) {
@@ -497,11 +708,13 @@ SimulationSummary SimulationEngine::run() {
 
     summary.initial_total_cash = initial_total_cash_;
     summary.final_total_cash = ledger_.get_total_cash();
-    summary.cash_conserved = ledger_.verify_cash_conservation(initial_total_cash_);
 
     summary.initial_total_inventory = initial_total_inventory_;
     summary.final_total_inventory = ledger_.get_total_inventory();
-    summary.inventory_conserved = ledger_.verify_inventory_conservation(initial_total_inventory_);
+
+    auto audit = ledger_.verify_all_invariants(initial_total_cash_, initial_total_inventory_);
+    summary.cash_conserved = audit.ok && ledger_.verify_cash_conservation(initial_total_cash_);
+    summary.inventory_conserved = audit.ok && ledger_.verify_inventory_conservation(initial_total_inventory_);
 
     const auto* strat_pos = ledger_.get_account(config_.strategy_account_id);
     if (strat_pos) {
@@ -612,9 +825,11 @@ std::string SimulationEngine::get_state_content() const {
            << ",\"inventory\":" << pos.inventory
            << ",\"reserved_cash\":" << pos.reserved_cash
            << ",\"reserved_inventory\":" << pos.reserved_inventory
+           << ",\"pending_buy_qty\":" << pos.pending_buy_quantity
+           << ",\"total_cost\":" << pos.total_cost
            << ",\"fees_paid\":" << pos.total_fees_paid
            << ",\"realized_pnl\":" << pos.realized_pnl
-           << ",\"avg_cost\":" << pos.avg_cost_basis << "}";
+           << ",\"avg_cost\":" << pos.cost_basis_per_lot() << "}";
     }
     ss << "],\"book\":" << Serializer::to_json(book_.get_snapshot()) << "}\n";
     return ss.str();
@@ -627,8 +842,8 @@ std::string SimulationEngine::get_manifest_content(const std::string& config_con
        << ",\"seed\":" << config_.seed
        << ",\"run_horizon_ns\":" << config_.run_horizon_ns
        << ",\"config_hash\":\"" << config_hash << "\""
-       << ",\"code_revision\":\"267377e\""
-       << ",\"environment\":\"Windows 11 x86_64, Clang 23.1.4 C++20\""
+       << ",\"code_revision\":\"" << MARKETLAB_BUILD_REVISION << "\""
+       << ",\"environment\":\"" << get_build_environment() << "\""
        << "}\n";
     return ss.str();
 }

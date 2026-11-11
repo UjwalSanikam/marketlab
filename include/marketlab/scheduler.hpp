@@ -13,6 +13,7 @@
 namespace marketlab {
 
 enum class EventPriority : uint8_t {
+    MarketDataAuthoritative = 0,
     MarketDataDelivery = 1,
     StrategyWakeup = 2,
     OrderAdmission = 3,

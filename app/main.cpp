@@ -429,14 +429,24 @@ int run_sim(int argc, char* argv[]) {
         std::stringstream buffer;
         buffer << cfs.rdbuf();
         config_content = buffer.str();
-        config = SimulationConfig::from_json(config_content);
+        auto [cfg_opt, err] = SimulationConfig::from_json_strict(config_content);
+        if (!cfg_opt) {
+            std::cerr << "Configuration error in " << config_path << ": " << err << "\n";
+            return 1;
+        }
+        config = *cfg_opt;
     } else {
         std::ifstream cfs("data/demo_session.json");
         if (cfs.is_open()) {
             std::stringstream buffer;
             buffer << cfs.rdbuf();
             config_content = buffer.str();
-            config = SimulationConfig::from_json(config_content);
+            auto [cfg_opt, err] = SimulationConfig::from_json_strict(config_content);
+            if (!cfg_opt) {
+                std::cerr << "Configuration error in data/demo_session.json: " << err << "\n";
+                return 1;
+            }
+            config = *cfg_opt;
         } else {
             config_content = config.to_json();
         }
