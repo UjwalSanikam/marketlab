@@ -6,6 +6,7 @@ This repository implements:
 - **Milestone 1**: The Deterministic Matching Engine Core (C++20, price-time priority, checked arithmetic, overflow hardening, strict input parsing, and canonical SHA-256 reproducibility).
 - **Milestone 2**: Deterministic Simulated Trading Session (Virtual clock and priority-queue scheduler, strategy interface, inventory-aware market maker, pre-trade atomic risk reservations, and a conservation-audited portfolio ledger).
 - **Milestone 3**: Real Market-Data Capture, Reconstructed Order Book, Historical Replay, & Conservative Execution Model (Public Binance Spot BTCUSDT raw capture, exact integer decimal scaling, official snapshot synchronization, queue-ahead depletion, aggressive liquidity consumption, and double-entry conservation).
+- **Milestone 4**: Event-Driven Backtester & Execution Model Calibration (Configurable passive queue position, aggressive market impact, gross/net P&L, fees, turnover, fill rate, drawdown, post-fill markouts across configurable horizons, chronological calibration/holdout validation, and bitwise reproducible exports).
 
 ---
 
@@ -485,8 +486,159 @@ Captures live public Binance Spot BTCUSDT WebSocket streaming messages and REST 
 
 ---
 
-## 8. Next Milestones (Roadmap)
+## 8. Milestone 4 Capabilities: Event-Driven Backtesting & Calibration
 
-- **Milestone 4**: Event-Driven Backtester & Execution Model Calibration (fill simulation models, adverse selection, market impact modeling).
+Milestone 4 introduces an event-driven backtesting engine (`marketlab backtest`) and a calibration workflow (`marketlab calibrate`) with explicit execution model assumptions, comprehensive reporting, and out-of-sample holdout validation.
+
+### 1. Configurable Execution Model Assumptions
+- **Passive Queue Position Models (`--queue-model`, `--queue-pct`)**:
+  - `CONSERVATIVE` (100% visible depth ahead): Order joins the back of the queue; fills only after all pre-existing depth trades.
+  - `OPTIMISTIC` (0% queue ahead): Order assumes front-of-queue priority; fills immediately on any touching public trade.
+  - `PROPORTIONAL` (`--queue-pct <0-100>`): Assumes a configurable fraction of resting depth ahead (e.g. 50% for middle-of-queue priority).
+- **Aggressive Impact & Slippage Models (`--impact-model`, `--slippage-ticks`, `--impact-ticks`)**:
+  - `NONE`: Baseline execution against visible reconstructed book prices.
+  - `FIXED_SLIPPAGE`: Applies a deterministic tick penalty to aggressive fills.
+  - `LINEAR_IMPACT`: Penalizes fill price proportional to order lot size.
+  - *Protection Price Enforced*: Simulated execution prices cannot exceed the client's limit price or protected market-buy cap.
+
+### 2. Comprehensive Financial & Risk Metrics
+- **Financial Performance**: Gross P&L, Net P&L, Realized P&L, Unrealized P&L, Trading Fees, Turnover.
+- **Order & Trade Profile**: Orders Submitted/Accepted/Rejected/Canceled, Aggressive/Passive Trades, Filled Volume, Quantity & Order Fill Rates.
+- **Risk & Drawdown Profile**: Inventory range (Min, Max, Peak Exposure), Peak Equity, Max Drawdown (ticks and %).
+- **Double-Entry Ledger Audit**: Rigorous verification that total system cash and inventory are conserved across all simulation events.
+
+### 3. Post-Fill Markout Analysis
+Post-fill markouts evaluate price movement at configurable horizons ($T_{\text{fill}} + H$, default: 100ms, 1s, 5s):
+- **Completed**: Target timestamp occurred within the session and a valid mid price was observed.
+  - Buy fill: $\text{markout\_ticks} = M - P$
+  - Sell fill: $\text{markout\_ticks} = P - M$
+  - Basis points: $\text{markout\_bps} = \frac{\text{markout\_ticks}}{P} \times 10{,}000$
+- **Unfinished**: Target timestamp extends beyond the session horizon.
+- **MissingMark**: Target timestamp was reached, but the feed status was invalid or book was unpopulated.
+- **Causality Guarantee**: Markout metrics are computed from chronologically recorded book state without lookahead or feedback into strategy logic.
+
+### 4. Calibration & Holdout Validation Workflow
+- **Chronological Split**: Input events are divided at timestamp $T_{\text{split}} = T_{\text{start}} + \lfloor (T_{\text{end}} - T_{\text{start}}) \times R \rfloor$ (default: 60% train / 40% holdout).
+- **In-Sample Parameter Selection**: Evaluates candidate grid on calibration data and ranks by objective (`net_pnl`, `gross_pnl`, `fill_rate`, `min_drawdown`).
+- **Holdout Validation**: The winning candidate and baseline are evaluated out-of-sample on holdout data. To maintain valid feed state, an authoritative reconstructed snapshot is synthesized at $T_{\text{split}}$ and prepended to holdout events, while strategy balances are reset to initial capital.
+- **Sensitivity Analysis Labeling**: If public trade data produces zero fills across all candidates, reports are explicitly labeled as "Execution Model Sensitivity Analysis".
+
+### Milestone 4 CLI Commands
+
+#### 1. Deterministic Strategy Backtest
+```powershell
+.\build\marketlab.exe backtest --input data\fixtures\calibration_fixture_norm.jsonl `
+  --events-out events.jsonl --fills-out fills.jsonl --state-out state.json `
+  --report-out report.json --manifest-out manifest.json --verify
+```
+Output:
+```text
+=========================================================
+  MarketLab Event-Driven Backtest Summary Report
+=========================================================
+Strategy:             ReferenceStrategy (Account: MM)
+Instrument:           BTCUSDT (tick=1, lot=1)
+Execution Model:      Queue=CONSERVATIVE (100%) | Impact=NONE
+Simulated Duration:   15.00 s (117 events processed)
+Feed Final Status:    VALID
+
+--- Financial Performance ---
+Starting Equity:      610010000000
+Ending Equity:        609564980000
+Gross P&L:            599564980000 ticks
+Net P&L:              599084960000 ticks
+Realized P&L:         113757980000
+Unrealized P&L:       485807000000
+Trading Fees Paid:    480020000
+Traded Turnover:      240010000000 notional
+
+--- Order & Execution Activity ---
+Orders Submitted:     30
+Orders Accepted:      11
+Orders Rejected:      19
+Orders Canceled:      6
+Total Trades:         4 (Aggressive=4, Passive=0)
+Total Lots Filled:    40000 lots / 300000 submitted
+Quantity Fill Rate:   13.33 %
+Order Fill Rate:      13.33 %
+
+--- Risk & Drawdown Profile ---
+Inventory Range:      Min=90000 | Max=100000 | Peak Exposure=100000 lots
+Final Inventory:      100000 lots
+Peak Equity:          610020000000
+Max Drawdown:         455020000 ticks (0.07 %)
+
+--- Double-Entry Ledger Conservation ---
+Cash Conservation:      [PASS] (Initial: 110000000000, Final: 110000000000)
+Inventory Conservation: [PASS] (Initial: 1000100000, Final: 1000100000)
+
+--- Post-Fill Markout Analysis ---
+Horizon   Completed   Unfinished  MissingMark Mean (ticks)  Mean (bps)  VWAP (ticks)  VWAP (bps)  
+----------------------------------------------------------------------------------------
+100ms     3           1           0           250.00        0.42        250.00        0.42        
+1s        3           1           0           233.33        0.39        233.33        0.39        
+5s        3           1           0           216.67        0.36        216.67        0.36        
+=========================================================
+
+--- Canonical SHA-256 Hashes ---
+Events SHA-256:   066c84f4fd15f43bd2fac741fc725200ae6834ba95add1d6fb6d17c21f981ff9  (events.jsonl)
+Fills SHA-256:    ab44c929065a4323865ad6f70593c1a3041c7677e3703e0eaf5b896fd2e8d7ad  (fills.jsonl)
+State SHA-256:    7c3ec302ad926d636552d107da2451cfe5c25acb5b2cc83f0b08641c6b4d46ba  (state.json)
+Report SHA-256:   25083464cd4c0d75cb9c3549a07fbd075e84f0cda811671b1aedba32305eda03  (report.json)
+Manifest SHA-256: 9135473339def5593ca49b66f40ec68dbc23a1b22d196d2ee63c0aa1b312cdc4  (manifest.json)
+Runtime:          105 us
+=========================================================
+Audit verification: ALL CONSERVATION CHECKS PASSED!
+```
+
+#### 2. Parameter Calibration & Out-of-Sample Holdout Validation
+```powershell
+.\build\marketlab.exe calibrate --input data\fixtures\calibration_fixture_norm.jsonl `
+  --split 0.6 --objective net_pnl --report-out calibration_report.json --verify
+```
+Output:
+```text
+================================================================================
+  Calibration & Holdout Validation
+================================================================================
+Objective:              NET_PNL
+Chronological Split:    60.0% Train / 40.0% Holdout
+Split Timestamp (ns):   10000000000
+Events:                 Total: 20 | Calibration: 17 | Holdout: 4
+--------------------------------------------------------------------------------
+  Calibration Period Rankings (In-Sample)
+--------------------------------------------------------------------------------
+Rank  Candidate                                       Score           Net PnL         Trades    Fill Rate   Max DD      
+1.    Candidate 2 (Wide Spread: 300 ticks)            600025000000    600025000000    0         0%          10000000    
+2.    Candidate 6 (Fixed Slippage: 2 ticks)           599787460080    599787460080    1         4%          117529960   
+3.    Baseline (Conservative, 200 spread, 10k quote)  599548984000    599548984000    2         8%          231008000   
+4.    Candidate 4 (Optimistic Queue: 0% ahead)        599548984000    599548984000    2         8%          231008000   
+5.    Candidate 5 (Proportional Queue: 50% ahead)     599548984000    599548984000    2         8%          231008000   
+6.    Candidate 3 (Large Size: 20k quote)             599072968000    599072968000    2         8%          467016000   
+7.    Candidate 1 (Tight Spread: 100 ticks)           598473458000    598473458000    7         28%         756521000   
+--------------------------------------------------------------------------------
+Selected Parameter Set: Candidate 2 (Wide Spread: 300 ticks)
+--------------------------------------------------------------------------------
+  Out-of-Sample Holdout Performance Comparison
+--------------------------------------------------------------------------------
+Metric                      Baseline                Selected Winner         
+Net P&L (cents):            599560976000            599560976000            
+Gross P&L (cents):          599800988000            599800988000            
+Fees Paid (cents):          240012000               240012000               
+Trades Executed:            2                       2                       
+Volume Traded (lots):       20000                   20000                   
+Fill Rate (Qty %):          33%                     33%                     
+Max Drawdown (cents):       229012000               229012000               
+================================================================================
+
+Calibration Time:       407 us
+Report exported to:     calibration_report.json
+Audit verification: ALL CONSERVATION CHECKS PASSED!
+```
+
+---
+
+## 9. Next Milestones (Roadmap)
+
 - **Milestone 5**: Real-Time Streaming & Fault Injection (WebSocket / IPC feeds, dropped packet emulation, network partitions, queue delay distributions).
 - **Milestone 6**: High-Performance Architecture Optimization (flat price-ladder, memory pools, zero-allocation ring buffers, SIMD-accelerated book ops).

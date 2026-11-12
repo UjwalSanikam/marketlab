@@ -17,6 +17,7 @@
 #include "strategy.hpp"
 #include "market_data_types.hpp"
 #include "reconstructed_book.hpp"
+#include "execution_model.hpp"
 
 namespace marketlab {
 
@@ -51,16 +52,19 @@ public:
     HistoricalExecutionAdapter(ReconstructedOrderBook& book,
                                Ledger& ledger,
                                RiskEngine& risk_engine,
-                               FeeConfig fee_config)
+                               FeeConfig fee_config,
+                               ExecutionModelConfig exec_model = {})
         : book_(book),
           ledger_(ledger),
           risk_engine_(risk_engine),
-          fee_config_(std::move(fee_config)) {
+          fee_config_(std::move(fee_config)),
+          exec_model_(std::move(exec_model)) {
         // Fund external counterparty account with ample initial balances for double-entry settlement
         ledger_.fund_account(EXTERNAL_MARKET_ACCOUNT, 100000000000LL, 1000000000LL);
     }
 
     [[nodiscard]] const ExecutionStats& stats() const noexcept { return stats_; }
+    [[nodiscard]] const ExecutionModelConfig& execution_model() const noexcept { return exec_model_; }
     [[nodiscard]] const std::unordered_map<OrderId, PassiveOrder>& active_passive_orders() const noexcept {
         return active_orders_;
     }
@@ -329,20 +333,22 @@ public:
             execute_aggressive_order(now, account_id, cmd, effective_price, out_reports, out_settlements);
         } else {
             // Passive resting order
-            Quantity q_ahead = 0;
+            Quantity visible_depth = 0;
             if (cmd.side == Side::Buy) {
                 Quantity book_q = book_.get_bid_qty(cmd.price);
                 Quantity consumed = 0;
                 auto it = consumed_bid_liquidity_.find(cmd.price);
                 if (it != consumed_bid_liquidity_.end()) consumed = it->second;
-                q_ahead = (book_q > consumed) ? (book_q - consumed) : 0;
+                visible_depth = (book_q > consumed) ? (book_q - consumed) : 0;
             } else {
                 Quantity book_q = book_.get_ask_qty(cmd.price);
                 Quantity consumed = 0;
                 auto it = consumed_ask_liquidity_.find(cmd.price);
                 if (it != consumed_ask_liquidity_.end()) consumed = it->second;
-                q_ahead = (book_q > consumed) ? (book_q - consumed) : 0;
+                visible_depth = (book_q > consumed) ? (book_q - consumed) : 0;
             }
+
+            Quantity q_ahead = exec_model_.calculate_initial_queue_ahead(visible_depth);
 
             active_orders_[cmd.order_id] = PassiveOrder{
                 cmd.order_id, account_id, cmd.side, cmd.price, cmd.quantity, cmd.quantity, q_ahead, now
@@ -407,12 +413,16 @@ private:
                 Quantity available = total_qty - consumed;
                 Quantity trade_qty = std::min(remaining_qty, available);
 
+                Price exec_price = exec_model_.apply_aggressive_impact(lvl_price, Side::Buy, trade_qty);
+                if (cmd.type == OrderType::Limit && exec_price > cmd.price) break; // Exceeds limit price
+                if (exec_price > protection_price) break; // Market buy protection cap
+
                 // Consume liquidity
                 consumed_ask_liquidity_[lvl_price] += trade_qty;
                 remaining_qty -= trade_qty;
 
                 // Execute trade against external counterparty
-                int64_t notional = lvl_price * trade_qty;
+                int64_t notional = exec_price * trade_qty;
                 int64_t taker_fee = fee_config_.calculate_taker_fee(notional);
                 int64_t maker_fee = fee_config_.calculate_maker_fee(notional);
 
@@ -420,7 +430,7 @@ private:
                 TradeSettlement settlement{
                     tid, now, cmd.order_id, 0,
                     account_id, EXTERNAL_MARKET_ACCOUNT, Side::Buy,
-                    lvl_price, trade_qty, notional, taker_fee, maker_fee
+                    exec_price, trade_qty, notional, taker_fee, maker_fee
                 };
                 ledger_.settle_trade(settlement);
                 out_settlements.push_back(settlement);
@@ -432,7 +442,7 @@ private:
                 stats_.total_fees_paid += taker_fee;
 
                 out_reports.push_back(ExecutionReport{
-                    ExecutionReport::Type::Trade, now, cmd.order_id, Side::Buy, lvl_price,
+                    ExecutionReport::Type::Trade, now, cmd.order_id, Side::Buy, exec_price,
                     cmd.quantity, remaining_qty, ""
                 });
             }
@@ -460,10 +470,13 @@ private:
                 Quantity available = total_qty - consumed;
                 Quantity trade_qty = std::min(remaining_qty, available);
 
+                Price exec_price = exec_model_.apply_aggressive_impact(lvl_price, Side::Sell, trade_qty);
+                if (cmd.type == OrderType::Limit && exec_price < cmd.price) break; // Below limit price
+
                 consumed_bid_liquidity_[lvl_price] += trade_qty;
                 remaining_qty -= trade_qty;
 
-                int64_t notional = lvl_price * trade_qty;
+                int64_t notional = exec_price * trade_qty;
                 int64_t taker_fee = fee_config_.calculate_taker_fee(notional);
                 int64_t maker_fee = fee_config_.calculate_maker_fee(notional);
 
@@ -471,7 +484,7 @@ private:
                 TradeSettlement settlement{
                     tid, now, cmd.order_id, 0,
                     account_id, EXTERNAL_MARKET_ACCOUNT, Side::Sell,
-                    lvl_price, trade_qty, notional, taker_fee, maker_fee
+                    exec_price, trade_qty, notional, taker_fee, maker_fee
                 };
                 ledger_.settle_trade(settlement);
                 out_settlements.push_back(settlement);
@@ -483,7 +496,7 @@ private:
                 stats_.total_fees_paid += taker_fee;
 
                 out_reports.push_back(ExecutionReport{
-                    ExecutionReport::Type::Trade, now, cmd.order_id, Side::Sell, lvl_price,
+                    ExecutionReport::Type::Trade, now, cmd.order_id, Side::Sell, exec_price,
                     cmd.quantity, remaining_qty, ""
                 });
             }
@@ -536,6 +549,7 @@ private:
     Ledger& ledger_;
     RiskEngine& risk_engine_;
     FeeConfig fee_config_;
+    ExecutionModelConfig exec_model_;
     ExecutionStats stats_;
 
     uint64_t next_trade_id_{50000};

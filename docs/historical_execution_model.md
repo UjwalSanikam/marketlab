@@ -76,3 +76,21 @@ Historical fills do not have internal maker-taker counterparty pairs from the sa
 3. **Hidden / Iceberg Orders**: Exchange orders that are not displayed in public depth feeds cannot be consumed.
 4. **Market Impact**: Simulated strategy orders do not alter real historical market trajectories or cause other participants to alter their behavior.
 5. **Network / Co-location Advantage**: Sub-millisecond packet racing or exchange gateway queue jumps are outside the scope of L2 replay.
+
+---
+
+## 5. Milestone 4 Configurable Execution Models
+
+Milestone 4 extends the baseline model with parameterizable sensitivity analysis options:
+
+### A. Passive Queue Position Models
+- **Conservative (Default)**: 100% of visible resting depth placed ahead of resting order.
+- **Optimistic**: 0% depth placed ahead (immediate fill eligibility on any price match).
+- **Proportional (`queue_position_pct`)**: $\lfloor \frac{\text{pct}}{100} \times \text{Depth} \rfloor$ lots ahead.
+
+### B. Aggressive Impact Models
+- **None (Default)**: Fills at exact visible reconstructed book prices.
+- **Fixed Slippage (`fixed_slippage_ticks`)**: Applies a constant tick penalty to aggressive fills.
+- **Linear Impact (`impact_ticks_per_lot`)**: Penalizes fill price proportional to order size.
+- **Protection Bound**: Fills are strictly constrained by the client's limit price and market-buy protection price cap.
+

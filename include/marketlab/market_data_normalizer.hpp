@@ -14,6 +14,12 @@ namespace marketlab {
 
 using NormalizedEvent = std::variant<NormalizedSnapshot, NormalizedDepthUpdate, NormalizedTrade, NormalizedFeedStatus>;
 
+[[nodiscard]] inline SimTime get_event_time(const NormalizedEvent& ev) noexcept {
+    return std::visit([](const auto& e) -> SimTime {
+        return e.local_receipt_time_ns;
+    }, ev);
+}
+
 class MarketDataNormalizer {
 public:
     explicit MarketDataNormalizer(InstrumentMetadata meta = {}) : meta_(std::move(meta)) {}

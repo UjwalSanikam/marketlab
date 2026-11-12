@@ -12,12 +12,6 @@ namespace marketlab {
 
 namespace {
 
-SimTime get_event_time(const NormalizedEvent& ev) noexcept {
-    return std::visit([](const auto& e) -> SimTime {
-        return e.local_receipt_time_ns;
-    }, ev);
-}
-
 std::string get_build_environment() {
     std::string env;
 #if defined(_WIN32)
@@ -52,7 +46,7 @@ HistoricalReplayEngine::HistoricalReplayEngine(HistoricalReplayConfig config)
       book_(config_.instrument),
       ledger_(config_.fees),
       risk_engine_(config_.risk),
-      execution_adapter_(book_, ledger_, risk_engine_, config_.fees),
+      execution_adapter_(book_, ledger_, risk_engine_, config_.fees, config_.execution_model),
       strategy_(std::make_unique<InventoryAwareMarketMaker>(config_.strategy_config)) {
 
     ledger_.fund_account(config_.strategy_account_id,
@@ -392,13 +386,18 @@ std::string HistoricalReplayEngine::get_manifest_content(const std::string& raw_
        << "    \"lot_size\": " << config_.instrument.lot_size << "\n"
        << "  },\n"
        << "  \"execution_model\": {\n"
-       << "    \"version\": \"conservative_queue_ahead_v1\",\n"
+       << "    \"queue_model\": \"" << to_string(config_.execution_model.queue_model) << "\",\n"
+       << "    \"queue_position_pct\": " << config_.execution_model.queue_position_pct << ",\n"
+       << "    \"impact_model\": \"" << to_string(config_.execution_model.impact_model) << "\",\n"
+       << "    \"fixed_slippage_ticks\": " << config_.execution_model.fixed_slippage_ticks << ",\n"
+       << "    \"impact_ticks_per_lot\": " << config_.execution_model.impact_ticks_per_lot << ",\n"
        << "    \"assumptions\": [\n"
        << "      \"L2 aggregated depth does not reveal exact FIFO queue position or hidden orders\",\n"
-       << "      \"Queue ahead initialized to observed resting depth at order admission\",\n"
+       << "      \"Queue ahead initialized based on queue_model (Conservative: 100%, Optimistic: 0%, Proportional: queue_position_pct%)\",\n"
        << "      \"Public trades deplete queue ahead before passive orders can fill\",\n"
        << "      \"Public trade volume cannot fill multiple hypothetical orders beyond actual volume\",\n"
        << "      \"Aggressive orders hypothetically consume visible depth until refreshed by subsequent depth updates\",\n"
+       << "      \"Aggressive slippage/impact applied according to impact_model\",\n"
        << "      \"External counterparty HISTORICAL_MARKET ensures exact double-entry ledger conservation\"\n"
        << "    ]\n"
        << "  },\n"

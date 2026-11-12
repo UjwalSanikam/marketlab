@@ -18,6 +18,11 @@
 #include "marketlab/reconstructed_book.hpp"
 #include "marketlab/historical_execution_adapter.hpp"
 #include "marketlab/historical_replay_engine.hpp"
+#include "marketlab/execution_model.hpp"
+#include "marketlab/backtest_report.hpp"
+#include "marketlab/reference_strategy.hpp"
+#include "marketlab/backtest_engine.hpp"
+#include "marketlab/calibration_engine.hpp"
 
 using namespace marketlab;
 
@@ -77,6 +82,33 @@ void print_help() {
     std::cout << "        --verify           Enforce cash/inventory conservation (exit 1 if failed)\n\n";
     std::cout << "  marketlab demo-hist\n";
     std::cout << "      Run interactive historical execution demo (reconstruction, aggressive IOC, passive queue-ahead).\n\n";
+    std::cout << "  marketlab backtest [options]\n";
+    std::cout << "      Run event-driven strategy backtesting against normalized historical market data.\n";
+    std::cout << "      Options:\n";
+    std::cout << "        --input <file>        Normalized JSONL stream (required)\n";
+    std::cout << "        --strategy-mode <m>   Strategy mode: MARKET_MAKER, TAKER, HYBRID (default: HYBRID)\n";
+    std::cout << "        --quote-size <lots>   Quote size per order (default: 10000)\n";
+    std::cout << "        --half-spread <ticks> Half spread in price ticks (default: 200)\n";
+    std::cout << "        --skew <ticks>        Reservation price skew per lot (default: 1)\n";
+    std::cout << "        --queue-model <m>     Passive queue model: CONSERVATIVE, OPTIMISTIC, PROPORTIONAL\n";
+    std::cout << "        --queue-pct <0-100>   Queue ahead percentage for proportional model (default: 100)\n";
+    std::cout << "        --impact-model <m>    Aggressive impact model: NONE, FIXED_SLIPPAGE, LINEAR_IMPACT\n";
+    std::cout << "        --slippage-ticks <t>  Fixed slippage ticks paid on aggressive fills\n";
+    std::cout << "        --impact-ticks <t>    Linear impact scaling ticks per lot\n";
+    std::cout << "        --events-out <f>      Export canonical events log\n";
+    std::cout << "        --fills-out <f>       Export canonical fills log\n";
+    std::cout << "        --state-out <f>       Export final book & portfolio state\n";
+    std::cout << "        --report-out <f>      Export backtest summary report JSON\n";
+    std::cout << "        --manifest-out <f>    Export deterministic backtest manifest\n";
+    std::cout << "        --verify              Enforce cash/inventory conservation (exit 1 if failed)\n\n";
+    std::cout << "  marketlab calibrate [options]\n";
+    std::cout << "      Calibrate execution and strategy parameters using chronological train/holdout split.\n";
+    std::cout << "      Options:\n";
+    std::cout << "        --input <file>        Normalized JSONL stream (required)\n";
+    std::cout << "        --split <ratio>       Chronological split ratio (default: 0.6)\n";
+    std::cout << "        --objective <obj>     Objective: net_pnl, gross_pnl, fill_rate, min_drawdown\n";
+    std::cout << "        --report-out <f>      Export calibration report JSON\n";
+    std::cout << "        --verify              Enforce conservation and audit holdout consistency\n\n";
     std::cout << "  marketlab capture [options]\n";
     std::cout << "      Run live Binance Spot market-data collector.\n";
     std::cout << "      Options:\n";
@@ -821,6 +853,343 @@ int run_replay_hist(int argc, char* argv[]) {
     return 0;
 }
 
+int run_backtest(int argc, char* argv[]) {
+    std::string input_path;
+    std::string config_path;
+    std::string events_out_path;
+    std::string fills_out_path;
+    std::string state_out_path;
+    std::string report_out_path;
+    std::string manifest_out_path;
+    bool verify = false;
+
+    BacktestConfig cfg;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--input" && i + 1 < argc) {
+            input_path = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc) {
+            config_path = argv[++i];
+        } else if (arg == "--strategy-mode" && i + 1 < argc) {
+            std::string sm = argv[++i];
+            if (sm == "TAKER" || sm == "taker") cfg.strategy_config.mode = ReferenceStrategyMode::Taker;
+            else if (sm == "MARKET_MAKER" || sm == "market_maker" || sm == "MM") cfg.strategy_config.mode = ReferenceStrategyMode::MarketMaker;
+            else cfg.strategy_config.mode = ReferenceStrategyMode::Hybrid;
+        } else if (arg == "--quote-size" && i + 1 < argc) {
+            cfg.strategy_config.quote_size = std::stoll(argv[++i]);
+        } else if (arg == "--half-spread" && i + 1 < argc) {
+            cfg.strategy_config.half_spread = std::stoll(argv[++i]);
+        } else if (arg == "--skew" && i + 1 < argc) {
+            cfg.strategy_config.skew_per_lot = std::stoll(argv[++i]);
+        } else if (arg == "--rebalance-threshold" && i + 1 < argc) {
+            cfg.strategy_config.rebalance_threshold = std::stoll(argv[++i]);
+        } else if (arg == "--queue-model" && i + 1 < argc) {
+            cfg.execution_model.queue_model = parse_queue_model(argv[++i]);
+        } else if (arg == "--queue-pct" && i + 1 < argc) {
+            cfg.execution_model.queue_position_pct = std::stoi(argv[++i]);
+        } else if (arg == "--impact-model" && i + 1 < argc) {
+            cfg.execution_model.impact_model = parse_impact_model(argv[++i]);
+        } else if (arg == "--slippage-ticks" && i + 1 < argc) {
+            cfg.execution_model.fixed_slippage_ticks = std::stoll(argv[++i]);
+        } else if (arg == "--impact-ticks" && i + 1 < argc) {
+            cfg.execution_model.impact_ticks_per_lot = std::stoll(argv[++i]);
+        } else if (arg == "--maker-fee" && i + 1 < argc) {
+            cfg.fees.maker_fee_bps = std::stoll(argv[++i]);
+        } else if (arg == "--taker-fee" && i + 1 < argc) {
+            cfg.fees.taker_fee_bps = std::stoll(argv[++i]);
+        } else if (arg == "--starting-cash" && i + 1 < argc) {
+            cfg.strategy_starting_cash = std::stoll(argv[++i]);
+        } else if (arg == "--starting-inv" && i + 1 < argc) {
+            cfg.strategy_starting_inventory = std::stoll(argv[++i]);
+        } else if (arg == "--events-out" && i + 1 < argc) {
+            events_out_path = argv[++i];
+        } else if (arg == "--fills-out" && i + 1 < argc) {
+            fills_out_path = argv[++i];
+        } else if (arg == "--state-out" && i + 1 < argc) {
+            state_out_path = argv[++i];
+        } else if (arg == "--report-out" && i + 1 < argc) {
+            report_out_path = argv[++i];
+        } else if (arg == "--manifest-out" && i + 1 < argc) {
+            manifest_out_path = argv[++i];
+        } else if (arg == "--verify") {
+            verify = true;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: marketlab backtest --input <normalized_stream> [options]\n";
+            return 0;
+        } else {
+            std::cerr << "Unknown backtest argument: " << arg << "\n";
+            return 1;
+        }
+    }
+
+    if (input_path.empty()) {
+        std::cerr << "Error: --input <file> is required for backtest.\n";
+        return 1;
+    }
+
+    std::ifstream ifs(input_path, std::ios::binary);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: cannot open input file: " << input_path << "\n";
+        return 1;
+    }
+
+    auto events = MarketDataNormalizer::read_normalized_stream(ifs);
+    ifs.close();
+
+    if (events.empty()) {
+        std::cerr << "Error: no valid normalized events read from " << input_path << "\n";
+        return 1;
+    }
+
+    BacktestEngine engine(cfg);
+    engine.load_events(std::move(events));
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    BacktestReport report = engine.run();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+    // Print summary to stdout
+    std::cout << report.to_string() << "\n";
+
+    // Write canonical export files in explicit binary mode (UTF-8/LF)
+    auto write_bin = [](const std::string& path, const std::string& content) -> bool {
+        std::ofstream ofs(path, std::ios::binary);
+        if (!ofs.is_open()) return false;
+        ofs.write(content.data(), content.size());
+        return ofs.good();
+    };
+
+    if (!events_out_path.empty()) {
+        if (!write_bin(events_out_path, engine.get_events_content())) {
+            std::cerr << "Error: failed to write events output file: " << events_out_path << "\n";
+            return 1;
+        }
+    }
+
+    if (!fills_out_path.empty()) {
+        if (!write_bin(fills_out_path, engine.get_fills_content())) {
+            std::cerr << "Error: failed to write fills output file: " << fills_out_path << "\n";
+            return 1;
+        }
+    }
+
+    if (!state_out_path.empty()) {
+        if (!write_bin(state_out_path, engine.get_state_content())) {
+            std::cerr << "Error: failed to write state output file: " << state_out_path << "\n";
+            return 1;
+        }
+    }
+
+    std::string report_json = report.to_json();
+    if (!report_out_path.empty()) {
+        if (!write_bin(report_out_path, report_json)) {
+            std::cerr << "Error: failed to write report output file: " << report_out_path << "\n";
+            return 1;
+        }
+    }
+
+    std::string events_hash = !events_out_path.empty()
+        ? Sha256::hash_file(events_out_path).value_or("")
+        : Sha256::hash_string(engine.get_events_content());
+
+    std::string fills_hash = !fills_out_path.empty()
+        ? Sha256::hash_file(fills_out_path).value_or("")
+        : Sha256::hash_string(engine.get_fills_content());
+
+    std::string state_hash = !state_out_path.empty()
+        ? Sha256::hash_file(state_out_path).value_or("")
+        : Sha256::hash_string(engine.get_state_content());
+
+    std::string report_hash = !report_out_path.empty()
+        ? Sha256::hash_file(report_out_path).value_or("")
+        : Sha256::hash_string(report_json);
+
+    std::string manifest_content = engine.get_manifest_content(report, events_hash, fills_hash, state_hash, report_hash);
+    if (!manifest_out_path.empty()) {
+        if (!write_bin(manifest_out_path, manifest_content)) {
+            std::cerr << "Error: failed to write manifest output file: " << manifest_out_path << "\n";
+            return 1;
+        }
+    }
+
+    std::string manifest_hash = !manifest_out_path.empty()
+        ? Sha256::hash_file(manifest_out_path).value_or("")
+        : Sha256::hash_string(manifest_content);
+
+    std::cout << "--- Canonical SHA-256 Hashes ---\n";
+    std::cout << "Events SHA-256:   " << events_hash;
+    if (!events_out_path.empty()) std::cout << "  (" << events_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Fills SHA-256:    " << fills_hash;
+    if (!fills_out_path.empty()) std::cout << "  (" << fills_out_path << ")";
+    std::cout << "\n";
+    std::cout << "State SHA-256:    " << state_hash;
+    if (!state_out_path.empty()) std::cout << "  (" << state_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Report SHA-256:   " << report_hash;
+    if (!report_out_path.empty()) std::cout << "  (" << report_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Manifest SHA-256: " << manifest_hash;
+    if (!manifest_out_path.empty()) std::cout << "  (" << manifest_out_path << ")";
+    std::cout << "\n";
+    std::cout << "Runtime:          " << elapsed_us << " us\n";
+    std::cout << "=========================================================\n";
+
+    if (verify) {
+        if (!report.cash_conserved || !report.inventory_conserved) {
+            std::cerr << "Verification error: Monetary or inventory conservation failed!\n";
+            return 1;
+        }
+        std::cout << "Audit verification: ALL CONSERVATION CHECKS PASSED!\n";
+    }
+
+    return 0;
+}
+
+int run_calibrate(int argc, char* argv[]) {
+    std::string input_path;
+    std::string config_path;
+    std::string report_out_path;
+    double split_ratio = 0.6;
+    CalibrationObjective objective = CalibrationObjective::NetPnL;
+    bool verify = false;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--input" && i + 1 < argc) {
+            input_path = argv[++i];
+        } else if (arg == "--config" && i + 1 < argc) {
+            config_path = argv[++i];
+        } else if (arg == "--split" && i + 1 < argc) {
+            split_ratio = std::stod(argv[++i]);
+        } else if (arg == "--objective" && i + 1 < argc) {
+            auto obj_opt = parse_calibration_objective(argv[++i]);
+            if (obj_opt) objective = *obj_opt;
+        } else if (arg == "--report-out" && i + 1 < argc) {
+            report_out_path = argv[++i];
+        } else if (arg == "--verify") {
+            verify = true;
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: marketlab calibrate --input <normalized_stream> [options]\n";
+            return 0;
+        } else {
+            std::cerr << "Unknown calibrate argument: " << arg << "\n";
+            return 1;
+        }
+    }
+
+    if (input_path.empty()) {
+        std::cerr << "Error: --input <file> is required for calibrate.\n";
+        return 1;
+    }
+
+    std::ifstream ifs(input_path, std::ios::binary);
+    if (!ifs.is_open()) {
+        std::cerr << "Error: cannot open input file: " << input_path << "\n";
+        return 1;
+    }
+
+    auto events = MarketDataNormalizer::read_normalized_stream(ifs);
+    ifs.close();
+
+    if (events.empty()) {
+        std::cerr << "Error: no valid normalized events read from " << input_path << "\n";
+        return 1;
+    }
+
+    CalibrationConfig cal_cfg;
+    cal_cfg.split_ratio = split_ratio;
+    cal_cfg.objective = objective;
+
+    // Baseline candidate
+    ParameterCandidate base_cand;
+    base_cand.label = "Baseline (Conservative, 200 spread, 10k quote)";
+    base_cand.strategy_config.mode = ReferenceStrategyMode::Hybrid;
+    base_cand.strategy_config.quote_size = 10000;
+    base_cand.strategy_config.half_spread = 200;
+    base_cand.strategy_config.skew_per_lot = 1;
+    base_cand.strategy_config.rebalance_threshold = 30000;
+    base_cand.execution_model.queue_model = QueuePositionModel::Conservative;
+    base_cand.execution_model.queue_position_pct = 100;
+    base_cand.execution_model.impact_model = AggressiveImpactModel::None;
+    cal_cfg.baseline_candidate = base_cand;
+
+    // Candidate grid
+    cal_cfg.candidate_grid.push_back(base_cand);
+
+    // Candidate 1: Tight spread
+    ParameterCandidate c1 = base_cand;
+    c1.label = "Candidate 1 (Tight Spread: 100 ticks)";
+    c1.strategy_config.half_spread = 100;
+    cal_cfg.candidate_grid.push_back(c1);
+
+    // Candidate 2: Wide spread
+    ParameterCandidate c2 = base_cand;
+    c2.label = "Candidate 2 (Wide Spread: 300 ticks)";
+    c2.strategy_config.half_spread = 300;
+    cal_cfg.candidate_grid.push_back(c2);
+
+    // Candidate 3: Large quote size
+    ParameterCandidate c3 = base_cand;
+    c3.label = "Candidate 3 (Large Size: 20k quote)";
+    c3.strategy_config.quote_size = 20000;
+    cal_cfg.candidate_grid.push_back(c3);
+
+    // Candidate 4: Optimistic queue position (sensitivity)
+    ParameterCandidate c4 = base_cand;
+    c4.label = "Candidate 4 (Optimistic Queue: 0% ahead)";
+    c4.execution_model.queue_model = QueuePositionModel::Optimistic;
+    c4.execution_model.queue_position_pct = 0;
+    cal_cfg.candidate_grid.push_back(c4);
+
+    // Candidate 5: Proportional queue position (sensitivity)
+    ParameterCandidate c5 = base_cand;
+    c5.label = "Candidate 5 (Proportional Queue: 50% ahead)";
+    c5.execution_model.queue_model = QueuePositionModel::Proportional;
+    c5.execution_model.queue_position_pct = 50;
+    cal_cfg.candidate_grid.push_back(c5);
+
+    // Candidate 6: Fixed slippage (sensitivity)
+    ParameterCandidate c6 = base_cand;
+    c6.label = "Candidate 6 (Fixed Slippage: 2 ticks)";
+    c6.execution_model.impact_model = AggressiveImpactModel::FixedSlippage;
+    c6.execution_model.fixed_slippage_ticks = 2;
+    cal_cfg.candidate_grid.push_back(c6);
+
+    CalibrationEngine cal_engine(cal_cfg);
+    cal_engine.prepare_data(events);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    CalibrationReport report = cal_engine.run();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
+    std::cout << report.to_string() << "\n";
+    std::cout << "Calibration Time:       " << elapsed_us << " us\n";
+
+    if (!report_out_path.empty()) {
+        std::ofstream ofs(report_out_path, std::ios::binary);
+        if (ofs.is_open()) {
+            std::string r_json = report.to_json();
+            ofs.write(r_json.data(), r_json.size());
+            std::cout << "Report exported to:     " << report_out_path << "\n";
+        }
+    }
+
+    if (verify) {
+        if (!report.baseline_holdout_report.cash_conserved || !report.baseline_holdout_report.inventory_conserved ||
+            !report.selected_holdout_report.cash_conserved || !report.selected_holdout_report.inventory_conserved) {
+            std::cerr << "Verification error: Holdout session conservation failed!\n";
+            return 1;
+        }
+        std::cout << "Audit verification: ALL CONSERVATION CHECKS PASSED!\n";
+    }
+
+    return 0;
+}
+
 int run_demo_hist() {
     std::cout << "=========================================================\n";
     std::cout << "  MarketLab Milestone 3 Historical Execution Demo\n";
@@ -974,6 +1343,10 @@ int main(int argc, char* argv[]) {
         return run_replay_hist(argc, argv);
     } else if (subcommand == "demo-hist") {
         return run_demo_hist();
+    } else if (subcommand == "backtest") {
+        return run_backtest(argc, argv);
+    } else if (subcommand == "calibrate") {
+        return run_calibrate(argc, argv);
     } else if (subcommand == "capture") {
         return run_capture(argc, argv);
     } else if (subcommand == "--help" || subcommand == "-h" || subcommand == "help") {

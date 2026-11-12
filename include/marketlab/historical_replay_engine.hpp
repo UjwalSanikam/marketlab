@@ -15,6 +15,7 @@
 #include "market_data_types.hpp"
 #include "market_data_normalizer.hpp"
 #include "reconstructed_book.hpp"
+#include "execution_model.hpp"
 #include "historical_execution_adapter.hpp"
 
 namespace marketlab {
@@ -29,6 +30,7 @@ struct HistoricalReplayConfig {
     int64_t strategy_starting_cash{100000000LL}; // In quote cents (e.g. 1M USDT = 100M cents)
     Quantity strategy_starting_inventory{100000}; // In lots (e.g. 1 BTC = 100,000 lots)
     SimTime run_horizon_ns{0}; // 0 = run until all events consumed
+    ExecutionModelConfig execution_model;
 };
 
 struct HistoricalReplaySummary {
